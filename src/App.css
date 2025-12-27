@@ -1,0 +1,65 @@
+/* Component-specific overrides and styles for the quiet, archival aesthetic */
+
+.space-title {
+  color: var(--text-primary) !important;
+  font-weight: 600 !important;
+  font-size: 18px !important;
+}
+
+.space-count {
+  color: var(--text-muted) !important;
+  background: transparent !important;
+  border: 1px solid var(--border-subtle) !important;
+  padding: 0.125rem 0.45rem !important;
+  border-radius: 999px !important;
+  font-size: var(--size-meta) !important;
+  font-weight: 600 !important;
+}
+
+.item-card img { border-radius: 12px; }
+.item-card .p-3 { padding: 0.75rem !important; }
+.item-card .p-3 h3 { margin: 0; }
+.item-card .no-image { display: flex; align-items: center; justify-content: center; }
+
+.empty-state { color: var(--text-muted); font-size: 14px; }
+.empty-state .p-6 { background: var(--accent-soft); color: var(--accent); }
+.empty-state-title { font-weight: 400; color: var(--text-muted); }
+
+/* Ensure inputs and textareas are calm */
+input, textarea {
+  border-radius: 12px !important;
+  border: 1px solid var(--border-subtle) !important;
+  background: var(--bg-surface) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Intent-specific textarea: text-first editing state — no visible box, add padding and remove outlines */
+.intent-group textarea {
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  padding: 0.35rem 0 0.35rem 0.75rem !important; /* top right bottom left */
+  border-radius: 0 !important;
+  color: var(--text-primary) !important;
+  font-weight: 400;
+  line-height: var(--line-height);
+  min-height: 2.25rem;
+}
+.intent-group textarea::placeholder { color: var(--text-muted); opacity: 1; font-style: normal; }
+.intent-group textarea:focus { outline: none !important; box-shadow: none !important; }
+
+/* Small meta utility */
+.small-meta { font-size: var(--size-meta); color: var(--text-muted); }
+
+/* Respect the icon rules inside components */
+.space-card svg, .item-card svg { color: var(--text-secondary); }
+.space-card .text-4xl { font-size: 1.6rem !important; }
+
+/* Accessibility: focus styles for interactive pieces */
+.space-card:focus, .item-card:focus, .capture-button:focus { outline: 3px solid var(--accent-soft); outline-offset: 4px; }
+
+/* Intent header subtle hover affordance */
+.intent-group:hover p { color: #475569 !important; }
+.intent-group .pen-icon { opacity: 0.2; transition: opacity 120ms ease; }
+.intent-group:hover .pen-icon { opacity: 0.4; }
