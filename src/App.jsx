@@ -34,6 +34,197 @@ const generateGradient = (str) => {
   return `linear-gradient(135deg, hsl(${h}, 70%, 90%) 0%, hsl(${(h + 40) % 360}, 70%, 95%) 100%)`;
 };
 
+// --- Metadata & Title inference helpers ---
+
+const normalizeTitle = (raw, domain) => {
+  if (!raw) return null;
+  let title = String(raw).toLowerCase();
+
+  // remove content after separators like "|" commonly used for site suffix
+  title = title.replace(/\|.*$/,'');
+
+  // Remove site tokens
+  if (domain) {
+    const site = domain.replace(/^www\./, '').replace(/\.(com|in|co|org|net)$/,'');
+    try { title = title.replace(new RegExp(site, 'g'), ''); } catch(e) {}
+  }
+
+  // Remove common boilerplate words
+  const boilerplate = ['price','images','mileage','specs','features','overview','review','reviews','news','blogs','blog','updated','latest','model','india','official','on-road','on road'];
+  boilerplate.forEach(w => {
+    title = title.replace(new RegExp('\\b' + w + '\\b','g'), '');
+  });
+
+  // Replace various separators with space
+  title = title.replace(/[-|•:\/]/g, ' ');
+
+  // Remove duplicate tokens (preserve order)
+  const seen = new Set();
+  title = title.split(/\s+/).filter(Boolean).filter(w => {
+    if (seen.has(w)) return false; seen.add(w); return true;
+  }).join(' ');
+
+  // Clean spacing and trim
+  title = title.replace(/\s+/g, ' ').trim();
+  if (!title) return null;
+
+  // Capitalize words
+  title = title.replace(/\b\w/g, c => c.toUpperCase());
+
+  // Length guard
+  if (title.length < 3) return null;
+
+  return title;
+};
+
+const inferTitleFromUrl = (url) => {
+  try {
+    const ignore = ['blogs','blog','news','reviews','colors','specs','gallery','images','price','posts','category','categories','tag','tags'];
+    const parts = new URL(url).pathname.split('/').filter(Boolean).filter(p => !ignore.includes(p.toLowerCase()));
+
+    if (parts.length >= 2) {
+      const brand = parts[parts.length - 2];
+      const model = parts[parts.length - 1];
+      const combined = `${brand} ${model}`.replace(/[-_]/g, ' ');
+      return normalizeTitle(combined, new URL(url).hostname);
+    }
+
+    if (parts.length === 1) {
+      const candidate = parts[0].replace(/[-_]/g, ' ');
+      return normalizeTitle(candidate, new URL(url).hostname);
+    }
+
+    return null;
+  } catch (e) {
+    return null;
+  }
+};
+
+const getInitial = (title) => {
+  if (!title) return '';
+  const first = title.split(/\s+/).filter(Boolean)[0] || title;
+  const ch = (first.replace(/[^a-zA-Z0-9]/g, '').charAt(0) || first.charAt(0) || title.charAt(0));
+  return (ch || '').toUpperCase();
+};
+
+const tryFetchHtml = async (url) => {
+  try {
+    const res = await fetch(url, { headers: { 'Accept': 'text/html' } });
+    if (!res.ok) throw new Error('Network error');
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('text/html')) throw new Error('Not HTML');
+    return await res.text();
+  } catch (err) { throw err; }
+};
+
+const fetchPageMetadata = async (url) => {
+  // Try direct fetch first
+  try {
+    const html = await tryFetchHtml(url);
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const ogTitle = doc.querySelector('meta[property="og:title"]')?.content;
+    const metaTitle = doc.querySelector('title')?.textContent;
+    const description = doc.querySelector('meta[name="description"]')?.content || doc.querySelector('meta[property="og:description"]')?.content;
+    let ogImage = doc.querySelector('meta[property="og:image"]')?.content || doc.querySelector('meta[name="twitter:image"]')?.content || doc.querySelector('link[rel="image_src"]')?.href || null;
+
+    // If ogImage is relative, resolve it
+    if (ogImage) {
+      try { ogImage = new URL(ogImage, url).href; } catch(e) {}
+    }
+
+    // If no OG image, try to pick a reasonable <img>
+    if (!ogImage) {
+      const imgs = Array.from(doc.querySelectorAll('img')).map(img => img.getAttribute('src') || img.getAttribute('data-src')).filter(Boolean);
+      const candidate = imgs.find(src => /\.(png|jpe?g|webp|gif|avif)$/i.test(src)) || imgs[0] || null;
+      if (candidate) {
+        try { ogImage = new URL(candidate, url).href; } catch(e) { ogImage = candidate; }
+      }
+    }
+
+    const rawTitle = ogTitle || metaTitle || description;
+    const title = normalizeTitle(rawTitle, new URL(url).hostname) || null;
+    return { title, image: ogImage || null };
+  } catch (err) {
+    // try proxy fallback (r.jina.ai as a lightweight fetch proxy)
+    try {
+      const proxy = 'https://r.jina.ai/http://';
+      const html = await tryFetchHtml(proxy + url.replace(/^https?:\/\//, ''));
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const ogTitle = doc.querySelector('meta[property="og:title"]')?.content;
+      const metaTitle = doc.querySelector('title')?.textContent;
+      let ogImage = doc.querySelector('meta[property="og:image"]')?.content || doc.querySelector('meta[name="twitter:image"]')?.content || doc.querySelector('link[rel="image_src"]')?.href || null;
+      if (ogImage) {
+        try { ogImage = new URL(ogImage, url).href; } catch(e) {}
+      }
+      if (!ogImage) {
+        const imgs = Array.from(doc.querySelectorAll('img')).map(img => img.getAttribute('src') || img.getAttribute('data-src')).filter(Boolean);
+        const candidate = imgs.find(src => /\.(png|jpe?g|webp|gif|avif)$/i.test(src)) || imgs[0] || null;
+        if (candidate) {
+          try { ogImage = new URL(candidate, url).href; } catch(e) { ogImage = candidate; }
+        }
+      }
+      const rawTitle = ogTitle || metaTitle;
+      const title = normalizeTitle(rawTitle, new URL(url).hostname) || null;
+      return { title, image: ogImage || null };
+    } catch (err2) {
+      // failed enrichment
+      return null;
+    }
+  }
+};
+
+const enrichUrlMetadata = async (id, url) => {
+  try {
+    const cacheKey = 'meta_cache_v1';
+    const cache = JSON.parse(localStorage.getItem(cacheKey) || '{}');
+    if (cache[url]) {
+      const currentItem = data.items.find(i => i.id === id);
+      const inferred = inferTitleFromUrl(url);
+      const shouldSetTitle = !currentItem?.userEditedTitle && (
+        !currentItem?.title || currentItem.title === 'Untitled link' || currentItem.title === inferred || (currentItem.title && currentItem.title.length < 3)
+      );
+      const shouldSetImage = !currentItem?.userEditedImage && !currentItem?.image && cache[url].image;
+      const updateObj = { site: cache[url].site, metaStatus: 'done' };
+      if (shouldSetTitle && cache[url].title) updateObj.title = cache[url].title;
+      if (shouldSetImage) updateObj.image = cache[url].image;
+      updateItem(id, updateObj);
+      return;
+    }
+
+    const result = await fetchPageMetadata(url);
+    if (result) {
+      const site = new URL(url).hostname.replace('www.', '');
+      const payload = { title: result.title, image: result.image, site };
+      // Update cache
+      cache[url] = payload;
+      localStorage.setItem(cacheKey, JSON.stringify(cache));
+
+      // Determine if it's safe to overwrite title
+      const currentItem = data.items.find(i => i.id === id);
+      const inferred = inferTitleFromUrl(url);
+      const shouldSetTitle = !currentItem?.userEditedTitle && (
+        !currentItem?.title || currentItem.title === 'Untitled link' || currentItem.title === inferred || (currentItem.title && currentItem.title.length < 3)
+      );
+
+      const shouldSetImage = !currentItem?.userEditedImage && !currentItem?.image && payload.image;
+      const updateObj = { site: payload.site, metaStatus: 'done' };
+      if (shouldSetTitle && payload.title) updateObj.title = payload.title;
+      if (shouldSetImage) updateObj.image = payload.image;
+
+      // Add a transient flash marker so UI can animate
+      updateObj.enrichFlash = true;
+      updateItem(id, updateObj);
+
+      // Clear enrichFlash after short delay
+      setTimeout(() => updateItem(id, { enrichFlash: false }), 1400);
+    } else {
+      // mark as failed so we can fallback gracefully
+      updateItem(id, { metaStatus: 'failed' });
+    }
+  } catch (e) {
+    updateItem(id, { metaStatus: 'failed' });
+  }
+};
 // --- COMPONENTS ---
 
 const Button = ({ children, onClick, variant = 'primary', className = '', ...props }) => {
@@ -120,28 +311,38 @@ export default function App() {
 
   const addItem = (content, targetBucketId, type = 'url') => {
     const isUrl = type === 'url' || content.startsWith('http');
-    const domain = isUrl ? getDomain(content) : 'image';
-    
+    const site = isUrl ? getDomain(content) : '';
+
+    // Layer 2: try to infer title from url immediately for speed
+    const inferredTitle = isUrl ? inferTitleFromUrl(content) : null;
+    const normalizedInferred = isUrl ? normalizeTitle(inferredTitle || '', site) : null;
+    const initialTitle = isUrl ? (normalizedInferred || 'Untitled link') : 'Pasted Image';
+
     const newItem = {
       id: generateId(),
       bucketId: targetBucketId,
       url: isUrl ? content : '',
-      title: isUrl ? domain : 'Pasted Image',
-      domain: domain,
+      // Title: prefer normalized inferred title; never default to domain as identity
+      title: initialTitle,
+      domain: site,
       image: type === 'image' ? content : (content.match(/\.(jpeg|jpg|gif|png|webp)$/i) ? content : null),
       notes: '',
       price: '',
       status: 'saved',
       isArchived: false,
       visitCount: 0,
+      metaStatus: isUrl ? 'pending' : 'done',
+      site: site,
       createdAt: Date.now()
     };
-
     setData(prev => ({ 
       ...prev, 
       items: [newItem, ...prev.items],
       lastUsedBucketId: targetBucketId 
     }));
+
+    // Start background enrichment when it's a URL
+    if (isUrl) enrichUrlMetadata(newItem.id, content);
   };
 
   const updateItem = (id, updates) => {
@@ -520,9 +721,14 @@ export default function App() {
                 >
                   <div 
                     className={`relative overflow-hidden shrink-0 flex items-center justify-center ${isCompact ? 'aspect-[4/3] w-full' : 'w-24 h-full'} ${item.image ? '' : 'no-image'}`}
-                    style={{ background: item.image ? 'transparent' : generateGradient(item.domain) }}
+                    style={{ background: item.image ? 'transparent' : generateGradient(item.url || item.title || item.domain) }}
                   >
-                    {item.image ? <img src={item.image} className="w-full h-full object-cover" alt="" /> : <span className="text-2xl font-black text-stone-900/10 uppercase">{item.domain.charAt(0)}</span>}
+                    {item.image ? <img src={item.image} className="w-full h-full object-cover" alt="" /> : <span className="text-2xl font-black text-stone-900/10 uppercase">{getInitial(item.title)}</span>}
+                    {/* metadata badges */}
+                    <div className="absolute top-2 right-2">
+                      {item.metaStatus === 'pending' && <span className="meta-dot" />}
+                      {item.enrichFlash && <span className="enrich-flash" />}
+                    </div>
                   </div>
                   <div className={`p-3 flex flex-col justify-center min-w-0 ${isCompact ? '' : 'flex-1'}`}>
                     <h3 className={`font-bold text-stone-800 leading-tight truncate ${isCompact ? 'text-sm' : 'text-base'}`}>{item.title}</h3>
@@ -618,7 +824,8 @@ export default function App() {
                 <label className="text-[10px] font-black text-stone-300 uppercase tracking-widest">Identify</label>
                 <input 
                   value={item.title}
-                  onChange={(e) => updateItem(item.id, { title: e.target.value })}
+                  onChange={(e) => updateItem(item.id, { title: e.target.value, userEditedTitle: true })}
+                  autoFocus={item.title === 'Untitled link' || !item.title || item.title.length < 3}
                   className="w-full text-2xl font-bold text-stone-800 bg-transparent border-none p-0 focus:ring-0 placeholder-stone-200"
                   placeholder="The Name"
                 />

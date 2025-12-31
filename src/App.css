@@ -63,3 +63,27 @@ input, textarea {
 .intent-group:hover p { color: #475569 !important; }
 .intent-group .pen-icon { opacity: 0.2; transition: opacity 120ms ease; }
 .intent-group:hover .pen-icon { opacity: 0.4; }
+
+/* Metadata pending & enrich visuals */
+.meta-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(79,70,229,0.08);
+}
+.enrich-flash {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: 0 6px 20px rgba(79,70,229,0.12);
+  animation: enrich-pulse 800ms ease-out 1;
+}
+@keyframes enrich-pulse {
+  0% { transform: scale(0.9); opacity: 0; }
+  30% { transform: scale(1.08); opacity: 0.9; }
+  100% { transform: scale(1); opacity: 1; }
+}
