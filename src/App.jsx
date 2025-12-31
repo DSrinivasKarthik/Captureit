@@ -277,6 +277,13 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [editingIntent, setEditingIntent] = useState(false);
 
+  // Unsaved edits tracking (QuickCapture input, pasted images, intent editing)
+  const unsavedRef = useRef(false);
+
+  // Navigation animation state for popstate transitions
+  const [isNavigating, setIsNavigating] = useState(false);
+  const navTimeoutRef = useRef(null);
+
   useEffect(() => {
     setEditingIntent(false);
   }, [activeBucketId, view]);
@@ -284,6 +291,83 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('capture_app_db_v5', JSON.stringify(data));
   }, [data]);
+
+  // --- In-app history & gesture/back handling (mobile) ---
+  const isPopping = useRef(false);
+
+  // Initialize a stable app state in history so the browser back gesture triggers popstate we control
+  useEffect(() => {
+    const state = window.history.state;
+    if (!state || !state.app) {
+      window.history.replaceState({ app: true, view, activeBucketId, activeItemId, modalMode }, '', '');
+    }
+
+    const hasUnsavedEdits = () => {
+      return !!(unsavedRef.current || editingIntent);
+    };
+
+    const handlePop = (e) => {
+      const st = e.state;
+
+      // If this is our app state, apply it and animate
+      if (st && st.app) {
+        isPopping.current = true;
+        setIsNavigating(true);
+        clearTimeout(navTimeoutRef.current);
+        navTimeoutRef.current = setTimeout(() => setIsNavigating(false), 260);
+
+        if (st.view) setView(st.view);
+        setActiveBucketId(st.activeBucketId || null);
+        setActiveItemId(st.activeItemId || null);
+        setModalMode(st.modalMode || null);
+        return;
+      }
+
+      // Not our state — user is trying to navigate away. If unsaved edits exist, confirm.
+      if (hasUnsavedEdits()) {
+        const leave = window.confirm('You have unsaved changes. Leave this page?');
+        if (!leave) {
+          // Re-push current app state to prevent navigation
+          try { window.history.pushState({ app: true, view, activeBucketId, activeItemId, modalMode }, '', ''); } catch (err) {}
+          return;
+        }
+        // If user confirms, allow navigation away by not blocking
+      }
+
+      // No unsaved edits — allow browser to proceed with its navigation
+    };
+
+    window.addEventListener('popstate', handlePop);
+
+    // Confirm on page unload if unsaved edits exist
+    const handleBeforeUnload = (e) => {
+      if (unsavedRef.current || editingIntent) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('popstate', handlePop);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      clearTimeout(navTimeoutRef.current);
+    };
+  }, [editingIntent, view, activeBucketId, activeItemId, modalMode]);
+
+  // Push history entries when app-level navigation changes. Guard against updates that originated from popstate.
+  useEffect(() => {
+    if (isPopping.current) {
+      isPopping.current = false;
+      return;
+    }
+    try {
+      window.history.pushState({ app: true, view, activeBucketId, activeItemId, modalMode }, '', '');
+    } catch (e) {
+      // ignore; some browsers may restrict pushState in certain contexts
+    }
+  }, [view, activeBucketId, activeItemId, modalMode]);
 
   // --- ACTIONS ---
 
@@ -454,6 +538,10 @@ export default function App() {
     const [justSaved, setJustSaved] = useState(false);
     const inputRef = useRef(null);
 
+    // touch swipe helpers for mobile dismissal
+    const touchStartY = useRef(null);
+    const touchDeltaY = useRef(0);
+
     useEffect(() => {
       const checkClipboard = async () => {
         try {
@@ -462,7 +550,7 @@ export default function App() {
             if (item.types.includes('image/png') || item.types.includes('image/jpeg')) {
               const blob = await item.getType(item.types.find(t => t.startsWith('image/')));
               const reader = new FileReader();
-              reader.onload = (e) => setPastedImage(e.target.result);
+              reader.onload = (e) => { setPastedImage(e.target.result); unsavedRef.current = true; };
               reader.readAsDataURL(blob);
               setIsClipboardDetected(true);
             } else if (item.types.includes('text/plain')) {
@@ -470,6 +558,7 @@ export default function App() {
               const text = await textBlob.text();
               if (text && (text.startsWith('http') || text.startsWith('www'))) {
                 setInputValue(text);
+                unsavedRef.current = true;
                 setIsClipboardDetected(true);
               }
             }
@@ -478,6 +567,8 @@ export default function App() {
       };
       if (inputRef.current) inputRef.current.focus();
       checkClipboard();
+
+      return () => { unsavedRef.current = false; };
     }, []);
 
     const handleSubmit = (e) => {
@@ -493,6 +584,7 @@ export default function App() {
       setInputValue('');
       setPastedImage(null);
       setIsClipboardDetected(false);
+      unsavedRef.current = false;
       setJustSaved(true);
       setTimeout(() => setJustSaved(false), 1500);
       if (inputRef.current) inputRef.current.focus();
@@ -500,7 +592,13 @@ export default function App() {
 
     return (
       <div className="fixed inset-x-0 bottom-0 z-50 animate-in slide-in-from-bottom-10 duration-300">
-        <div className="fixed inset-0 bg-stone-900/30 backdrop-blur-[2px]" onClick={() => setModalMode(null)} />
+        <div
+          className="fixed inset-0 bg-stone-900/30 backdrop-blur-[2px]"
+          onClick={() => { setModalMode(null); unsavedRef.current = false; }}
+          onTouchStart={(e) => { touchStartY.current = e.touches[0].clientY; touchDeltaY.current = 0; }}
+          onTouchMove={(e) => { if (touchStartY.current != null) touchDeltaY.current = e.touches[0].clientY - touchStartY.current; }}
+          onTouchEnd={() => { if (touchDeltaY.current > 80) { setModalMode(null); unsavedRef.current = false; } touchStartY.current = null; touchDeltaY.current = 0; }}
+        />
         <div className="relative bg-white border-t border-stone-100 shadow-[0_-15px_50px_rgba(0,0,0,0.15)] p-4 pb-10 rounded-t-[2.5rem]">
           <div className="flex justify-between items-center mb-4 px-2">
             <h2 className="text-xs font-bold uppercase tracking-widest text-stone-400">Capture Now</h2>
@@ -518,7 +616,7 @@ export default function App() {
                 <Input 
                   ref={inputRef}
                   value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
+                  onChange={(e) => { setInputValue(e.target.value); unsavedRef.current = (e.target.value || '').trim().length > 0; }}
                   placeholder="Paste URL or text..." 
                 />
               )}
@@ -557,7 +655,7 @@ export default function App() {
 
   if (view === 'home') {
     return (
-      <div className="min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center">
+      <div className={`min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center ${isNavigating ? 'is-navigating' : ''}`}>
         <div className="w-full max-w-md min-h-screen flex flex-col relative px-6">
           <header className="pt-16 pb-6">
             <h1 className="text-3xl font-black tracking-tight text-stone-800">Spaces</h1>
@@ -628,7 +726,7 @@ export default function App() {
     if (!bucket) return setView('home');
 
     return (
-      <div className="min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center">
+      <div className={`min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center ${isNavigating ? 'is-navigating' : ''}`}>
         <div className="w-full max-w-md min-h-screen flex flex-col relative px-4">
           <header className="pt-10 pb-4 flex items-center justify-between sticky top-0 bg-stone-50/90 backdrop-blur-md z-20">
             <button onClick={() => setView('home')} className="p-2 -ml-2 rounded-full hover:bg-stone-200"><ArrowLeft size={24} /></button>
@@ -684,8 +782,8 @@ export default function App() {
                 <textarea
                   autoFocus
                   value={bucket.intent}
-                  onChange={(e) => updateBucketIntent(bucket.id, e.target.value)}
-                  onBlur={() => setEditingIntent(false)}
+                  onChange={(e) => { updateBucketIntent(bucket.id, e.target.value); unsavedRef.current = true; }}
+                  onBlur={() => { setEditingIntent(false); unsavedRef.current = false; }}
                   rows={2}
                   className="w-full bg-transparent border-none p-0 text-sm leading-relaxed text-slate-700 resize-none focus:ring-0"
                   placeholder="Why does this space exist?"
@@ -794,7 +892,7 @@ export default function App() {
     if (!item) return setView('bucket');
 
     return (
-      <div className="min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center">
+      <div className={`min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center ${isNavigating ? 'is-navigating' : ''}`}>
         <div className="w-full max-w-md min-h-screen bg-white shadow-2xl flex flex-col relative">
           <header className="p-4 flex items-center justify-between border-b border-stone-100 sticky top-0 bg-white/80 backdrop-blur-md z-20">
              <button onClick={() => setView('bucket')} className="p-2 rounded-full hover:bg-stone-100"><ArrowLeft size={24} /></button>

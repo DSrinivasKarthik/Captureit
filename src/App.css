@@ -87,3 +87,10 @@ input, textarea {
   30% { transform: scale(1.08); opacity: 0.9; }
   100% { transform: scale(1); opacity: 1; }
 }
+
+/* Popstate navigation visual */
+.is-navigating { transform: translateY(6px); transition: transform .24s ease, opacity .24s ease; opacity: .98; }
+.view-transition { transition: transform .24s ease, opacity .24s ease; }
+
+/* Quick capture overlay swipe hint (subtle) */
+.fixed.inset-0.bg-stone-900\/30 { touch-action: pan-y; }
