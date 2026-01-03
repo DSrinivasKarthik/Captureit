@@ -117,9 +117,54 @@ const tryFetchHtml = async (url) => {
   } catch (err) { throw err; }
 };
 
-const fetchPageMetadata = async (url) => {
-  // Try direct fetch first
+const loadImageWithTimeout = (src, timeout = 3000, minWidth = 0, minHeight = 0) => new Promise((resolve) => {
+  const img = new Image();
+  let settled = false;
+  const timer = setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, timeout);
+  img.onload = () => {
+    if (!settled) {
+      const w = img.naturalWidth || 0;
+      const h = img.naturalHeight || 0;
+      const ok = w >= minWidth && h >= minHeight;
+      settled = true; clearTimeout(timer); resolve(ok);
+    }
+  };
+  img.onerror = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(false); } };
+  img.src = src;
+});
+
+const fetchJsonWithTimeout = async (url, timeout = 1500) => {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
   try {
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(id);
+    if (!res.ok) throw new Error('Network');
+    return await res.json();
+  } catch (e) {
+    clearTimeout(id);
+    throw e;
+  }
+};
+
+const fetchPageMetadata = async (url) => {
+  try {
+    // Try fast proxy first when it's local (low latency), else try direct fetch with a short timeout
+    if (METADATA_PROXY && METADATA_PROXY.includes('localhost')) {
+      try {
+        const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), 1200);
+        if (json) {
+          if (json.image) {
+            // require reasonable resolution for proxy images
+            const ok = await loadImageWithTimeout(json.image, 2000, 200, 120);
+            if (!ok) json.image = null;
+          }
+          const title = normalizeTitle(json?.title || '', new URL(url).hostname) || null;
+          return { title, image: json?.image || null };
+        }
+      } catch (e) { /* fall through to direct fetch */ }
+    }
+
     const html = await tryFetchHtml(url);
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const ogTitle = doc.querySelector('meta[property="og:title"]')?.content;
@@ -141,12 +186,34 @@ const fetchPageMetadata = async (url) => {
       }
     }
 
+    // Validate image quickly (avoid setting broken images)
+    if (ogImage) {
+      const ok = await loadImageWithTimeout(ogImage, 2500, 200, 120);
+      if (!ok) ogImage = null;
+    }
+
     const rawTitle = ogTitle || metaTitle || description;
     const title = normalizeTitle(rawTitle, new URL(url).hostname) || null;
     return { title, image: ogImage || null };
   } catch (err) {
     // try proxy fallback (r.jina.ai as a lightweight fetch proxy)
     try {
+      // try local metadata proxy first if available
+      if (METADATA_PROXY) {
+        try {
+          const pRes = await fetch(METADATA_PROXY + encodeURIComponent(url));
+          if (pRes.ok) {
+            const json = await pRes.json();
+            if (json?.image) {
+              const ok = await loadImageWithTimeout(json.image, 2500);
+              if (!ok) json.image = null;
+            }
+            const title = normalizeTitle(json?.title || '', new URL(url).hostname) || null;
+            return { title, image: json?.image || null };
+          }
+        } catch (e) { /* continue to jina */ }
+      }
+
       const proxy = 'https://r.jina.ai/http://';
       const html = await tryFetchHtml(proxy + url.replace(/^https?:\/\//, ''));
       const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -163,6 +230,12 @@ const fetchPageMetadata = async (url) => {
           try { ogImage = new URL(candidate, url).href; } catch(e) { ogImage = candidate; }
         }
       }
+
+      if (ogImage) {
+        const ok = await loadImageWithTimeout(ogImage, 2500);
+        if (!ok) ogImage = null;
+      }
+
       const rawTitle = ogTitle || metaTitle;
       const title = normalizeTitle(rawTitle, new URL(url).hostname) || null;
       return { title, image: ogImage || null };
@@ -173,17 +246,125 @@ const fetchPageMetadata = async (url) => {
   }
 };
 
+// Quick title extraction and cleaning for faster captures
+const extractBestTitle = (rawTitle, url) => {
+  if (!rawTitle) return null;
+  // Normalize whitespace
+  let t = String(rawTitle).replace(/\s+/g, ' ').trim();
+  // Remove noisy prefixes like "Home -" or "Welcome:"
+  t = t.replace(/^(home|welcome|index|untitled|page)\s*[\-:|—]\s*/i, '');
+  // split on common separators and prefer the most meaningful segment
+  const parts = t.split(/[|\-—:]/).map(p => p.trim()).filter(Boolean);
+  // remove common noisy words
+  const cleaned = parts.filter(p => !/^(home|index|welcome|untitled|page)\b/i.test(p));
+  const candidateParts = cleaned.length ? cleaned : parts;
+  // choose the longest segment (usually the most descriptive)
+  let chosen = candidateParts.reduce((a, b) => (a && a.length >= b.length ? a : b), candidateParts[0]);
+
+  // Further strip trailing site tokens (e.g., " - GitHub Blog" or " | GitHub")
+  try {
+    const domain = new URL(url).hostname.replace(/^www\./, '');
+    const siteToken = domain.split('.')[0];
+    const siteRegex = new RegExp('\\b' + siteToken + '\\b', 'i');
+    if (siteRegex.test(chosen)) {
+      chosen = chosen.replace(siteRegex, '').trim();
+    }
+  } catch (e) { /* ignore */ }
+
+  // fallback to normalized title
+  const out = normalizeTitle(chosen, (() => { try { return new URL(url).hostname; } catch(e){ return ''; } })());
+  return out || null;
+};
+
+const fetchTitleQuick = async (url, timeout = 1000) => {
+  try {
+    // Prefer a fast proxy when available
+    if (METADATA_PROXY) {
+      try {
+        const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), Math.min(timeout, 800));
+        if (json && json.title) return extractBestTitle(json.title, url);
+      } catch (e) { /* ignore proxy failure */ }
+    }
+
+    // Quick direct fetch with abort
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+      const res = await fetch(url, { signal: controller.signal, headers: { 'Accept': 'text/html' } });
+      clearTimeout(id);
+      if (!res.ok) throw new Error('Network');
+      const txt = await res.text();
+      const m = txt.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (m && m[1]) return extractBestTitle(m[1], url);
+    } catch (e) {
+      clearTimeout(id);
+    }
+  } catch (e) {}
+  return null;
+};
+
+// Quick image extraction for faster initial preview (tries proxy then quick DOM scan)
+const fetchImageQuick = async (url, timeout = 1200) => {
+  try {
+    if (METADATA_PROXY) {
+      try {
+        const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), Math.min(timeout, 900));
+        if (json && json.image) {
+          const ok = await loadImageWithTimeout(json.image, 1200, 200, 120);
+          if (ok) return json.image;
+        }
+      } catch (e) { /* ignore proxy failure */ }
+    }
+
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+      const res = await fetch(url, { signal: controller.signal, headers: { 'Accept': 'text/html' } });
+      clearTimeout(id);
+      if (!res.ok) throw new Error('Network');
+      const txt = await res.text();
+
+      // try og:image / twitter image / link rel
+      let m = txt.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>/i) ||
+              txt.match(/<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']+)["'][^>]*>/i) ||
+              txt.match(/<link[^>]*rel=["']image_src["'][^>]*href=["']([^"']+)["'][^>]*>/i);
+      let candidate = m && m[1] ? m[1] : null;
+
+      if (!candidate) {
+        // fallback: pick first reasonable <img src>
+        const imgMatches = Array.from(txt.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*>/ig)).map(a=>a[1]);
+        candidate = imgMatches.find(s => /\.(png|jpe?g|webp|avif)$/i.test(s) && !/logo|icon|sprite|ads?/i.test(s)) || imgMatches[0] || null;
+      }
+
+      if (candidate) {
+        try { candidate = new URL(candidate, url).href; } catch(e) {}
+        const ok = await loadImageWithTimeout(candidate, 1200);
+        if (ok) return candidate;
+      }
+    } catch (e) { clearTimeout(id); }
+  } catch (e) {}
+  return null;
+};
+
 const enrichUrlMetadata = async (id, url) => {
   try {
     const cacheKey = 'meta_cache_v1';
     const cache = JSON.parse(localStorage.getItem(cacheKey) || '{}');
+
+    // initialize attempt counter
+    const item = data.items.find(i => i.id === id);
+    const attempts = item?.metaAttempts || 0;
+
     if (cache[url]) {
       const currentItem = data.items.find(i => i.id === id);
       const inferred = inferTitleFromUrl(url);
       const shouldSetTitle = !currentItem?.userEditedTitle && (
         !currentItem?.title || currentItem.title === 'Untitled link' || currentItem.title === inferred || (currentItem.title && currentItem.title.length < 3)
       );
-      const shouldSetImage = !currentItem?.userEditedImage && !currentItem?.image && cache[url].image;
+      const isFavicon = (src) => !!(src && /s2\/favicons|favicon/i.test(src));
+      const shouldSetImage = !currentItem?.userEditedImage && (
+        (!currentItem?.image && cache[url].image) || (currentItem?.image && isFavicon(currentItem.image) && cache[url].image)
+      );
       const updateObj = { site: cache[url].site, metaStatus: 'done' };
       if (shouldSetTitle && cache[url].title) updateObj.title = cache[url].title;
       if (shouldSetImage) updateObj.image = cache[url].image;
@@ -206,7 +387,10 @@ const enrichUrlMetadata = async (id, url) => {
         !currentItem?.title || currentItem.title === 'Untitled link' || currentItem.title === inferred || (currentItem.title && currentItem.title.length < 3)
       );
 
-      const shouldSetImage = !currentItem?.userEditedImage && !currentItem?.image && payload.image;
+      const isFavicon = (src) => !!(src && /s2\/favicons|favicon/i.test(src));
+      const shouldSetImage = !currentItem?.userEditedImage && (
+        (!currentItem?.image && payload.image) || (currentItem?.image && isFavicon(currentItem.image) && payload.image)
+      );
       const updateObj = { site: payload.site, metaStatus: 'done' };
       if (shouldSetTitle && payload.title) updateObj.title = payload.title;
       if (shouldSetImage) updateObj.image = payload.image;
@@ -219,10 +403,15 @@ const enrichUrlMetadata = async (id, url) => {
       setTimeout(() => updateItem(id, { enrichFlash: false }), 1400);
     } else {
       // mark as failed so we can fallback gracefully
-      updateItem(id, { metaStatus: 'failed' });
+      const nextAttempts = attempts + 1;
+      updateItem(id, { metaStatus: 'failed', metaAttempts: nextAttempts });
+      // if attempts less than retries, schedule retry
+      if (nextAttempts < 3) setTimeout(() => enrichUrlMetadata(id, url), 2000 * nextAttempts);
     }
   } catch (e) {
-    updateItem(id, { metaStatus: 'failed' });
+    const nextAttempts = attempts + 1;
+    updateItem(id, { metaStatus: 'failed', metaAttempts: nextAttempts });
+    if (nextAttempts < 3) setTimeout(() => enrichUrlMetadata(id, url), 2000 * nextAttempts);
   }
 };
 // --- COMPONENTS ---
@@ -276,12 +465,22 @@ export default function App() {
   const [showArchive, setShowArchive] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [editingIntent, setEditingIntent] = useState(false);
+  // small global flash for transient messages
+  const [flash, setFlash] = useState('');
+  const setFlashMessage = (msg, ttl = 2200) => { setFlash(msg); if (msg) setTimeout(() => setFlash(''), ttl); };
+  const Flash = () => flash ? (
+    <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 bg-stone-900 text-white px-4 py-2 rounded-full shadow-xl text-sm font-medium">
+      {flash}
+    </div>
+  ) : null;
+
 
   // Unsaved edits tracking (QuickCapture input, pasted images, intent editing)
   const unsavedRef = useRef(false);
 
   // Navigation animation state for popstate transitions
   const [isNavigating, setIsNavigating] = useState(false);
+  const [navigationDirection, setNavigationDirection] = useState(null); // 'forward' | 'back' | null
   const navTimeoutRef = useRef(null);
 
   useEffect(() => {
@@ -309,12 +508,21 @@ export default function App() {
     const handlePop = (e) => {
       const st = e.state;
 
-      // If this is our app state, apply it and animate
+      // If this is our app state, apply it and animate with direction
       if (st && st.app) {
         isPopping.current = true;
+
+        const prevIndex = historyIndexRef.current;
+        const newIndex = typeof st.index === 'number' ? st.index : prevIndex - 1;
+        const direction = newIndex < prevIndex ? 'back' : 'forward';
+
         setIsNavigating(true);
+        // store direction briefly to allow CSS to show different animation
+        setNavigationDirection(direction);
         clearTimeout(navTimeoutRef.current);
-        navTimeoutRef.current = setTimeout(() => setIsNavigating(false), 260);
+        navTimeoutRef.current = setTimeout(() => { setIsNavigating(false); setNavigationDirection(null); }, 260);
+
+        historyIndexRef.current = newIndex;
 
         if (st.view) setView(st.view);
         setActiveBucketId(st.activeBucketId || null);
@@ -356,6 +564,17 @@ export default function App() {
     };
   }, [editingIntent, view, activeBucketId, activeItemId, modalMode]);
 
+  // History index tracking and pushState with index for direction
+  const historyIndexRef = useRef(0);
+
+  useEffect(() => {
+    // ensure initial index is present
+    const st = window.history.state;
+    if (st && st.app && typeof st.index === 'number') {
+      historyIndexRef.current = st.index;
+    }
+  }, []);
+
   // Push history entries when app-level navigation changes. Guard against updates that originated from popstate.
   useEffect(() => {
     if (isPopping.current) {
@@ -363,13 +582,20 @@ export default function App() {
       return;
     }
     try {
-      window.history.pushState({ app: true, view, activeBucketId, activeItemId, modalMode }, '', '');
+      const newIndex = historyIndexRef.current + 1;
+      window.history.pushState({ app: true, view, activeBucketId, activeItemId, modalMode, index: newIndex }, '', '');
+      historyIndexRef.current = newIndex;
     } catch (e) {
       // ignore; some browsers may restrict pushState in certain contexts
     }
   }, [view, activeBucketId, activeItemId, modalMode]);
 
   // --- ACTIONS ---
+
+  // Load proxy URL from global (optional) or fallback
+  const METADATA_PROXY = window.__METADATA_PROXY_URL || 'http://localhost:4000/fetch?url=';
+  // Track URLs currently being added to prevent race duplicates
+  const pendingUrlsRef = useRef(new Set());
 
   const addBucket = (name, emoji) => {
     const newBucket = { id: generateId(), name, emoji, viewMode: 'calm', intent: '', createdAt: Date.now() };
@@ -393,32 +619,55 @@ export default function App() {
     }));
   };
 
-  const addItem = (content, targetBucketId, type = 'url') => {
+  const addItem = (content, targetBucketId, type = 'url', initialTitle = null, initialImage = null) => {
     const isUrl = type === 'url' || content.startsWith('http');
     const site = isUrl ? getDomain(content) : '';
 
-    // Layer 2: try to infer title from url immediately for speed
-    const inferredTitle = isUrl ? inferTitleFromUrl(content) : null;
-    const normalizedInferred = isUrl ? normalizeTitle(inferredTitle || '', site) : null;
-    const initialTitle = isUrl ? (normalizedInferred || 'Untitled link') : 'Pasted Image';
+    // If same URL was recently saved in the same bucket, return existing id (prevent duplicates)
+    if (isUrl) {
+      if (pendingUrlsRef.current.has(content)) {
+        // if currently being added, avoid duplicate
+        const already = data.items.find(i => i.url === content && i.bucketId === targetBucketId);
+        if (already) return already.id; // if not yet in data, fallthrough
+      }
 
+      const existing = data.items.find(i => i.url === content && i.bucketId === targetBucketId);
+      if (existing) {
+        // If it was just created very recently, consider it a duplicate
+        if (Date.now() - existing.createdAt < 10000 || existing.metaStatus === 'pending') return existing.id;
+      }
+
+      // mark as pending to prevent race duplicates
+      pendingUrlsRef.current.add(content);
+    }
+
+    // Layer 2: prefer an already-provided title (quick fetch), else infer from URL
+    const inferredTitle = isUrl ? (initialTitle || inferTitleFromUrl(content)) : null;
+    const normalizedInferred = isUrl ? normalizeTitle(inferredTitle || '', site) : null;
+    const initialTitleToUse = isUrl ? (normalizedInferred || 'Untitled link') : 'Pasted Image';
+
+    const id = generateId();
+    // If we have an initialImage or title, mark metadata as done (we have a decent preview already)
+    const initialMetaDone = isUrl && (initialTitle || initialImage);
     const newItem = {
-      id: generateId(),
+      id,
       bucketId: targetBucketId,
       url: isUrl ? content : '',
-      // Title: prefer normalized inferred title; never default to domain as identity
-      title: initialTitle,
+      // Title: prefer normalized inferred title (or quick-fetched title); never default to domain as identity
+      title: initialTitleToUse,
       domain: site,
-      image: type === 'image' ? content : (content.match(/\.(jpeg|jpg|gif|png|webp)$/i) ? content : null),
+      image: type === 'image' ? content : (initialImage || (content.match(/\.(jpeg|jpg|gif|png|webp)$/i) ? content : null)),
       notes: '',
       price: '',
       status: 'saved',
       isArchived: false,
       visitCount: 0,
-      metaStatus: isUrl ? 'pending' : 'done',
+      metaStatus: initialMetaDone ? 'done' : (isUrl ? 'pending' : 'done'),
+      metaAttempts: 0,
       site: site,
       createdAt: Date.now()
     };
+
     setData(prev => ({ 
       ...prev, 
       items: [newItem, ...prev.items],
@@ -426,7 +675,11 @@ export default function App() {
     }));
 
     // Start background enrichment when it's a URL
-    if (isUrl) enrichUrlMetadata(newItem.id, content);
+    if (isUrl) enrichUrlMetadata(newItem.id, content).finally(() => {
+      // clear pendingUrl after enrichment attempt (not strictly definitive, but avoids permanent blocking)
+      pendingUrlsRef.current.delete(content);
+    });
+    return id;
   };
 
   const updateItem = (id, updates) => {
@@ -536,6 +789,10 @@ export default function App() {
     const [pastedImage, setPastedImage] = useState(null);
     const [isClipboardDetected, setIsClipboardDetected] = useState(false);
     const [justSaved, setJustSaved] = useState(false);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [alreadySavedMessage, setAlreadySavedMessage] = useState('');
+    const [pastedToast, setPastedToast] = useState('');
+    const [savedToast, setSavedToast] = useState('');
     const inputRef = useRef(null);
 
     // touch swipe helpers for mobile dismissal
@@ -560,6 +817,9 @@ export default function App() {
                 setInputValue(text);
                 unsavedRef.current = true;
                 setIsClipboardDetected(true);
+                // show small toast indicating where it will be saved
+                setPastedToast(`Detected link — will save to ${data.buckets.find(b => b.id === selectedBucketId)?.name || 'your space'}`);
+                setTimeout(() => setPastedToast(''), 2000);
               }
             }
           }
@@ -571,22 +831,55 @@ export default function App() {
       return () => { unsavedRef.current = false; };
     }, []);
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
       e.preventDefault();
       if (!inputValue.trim() && !pastedImage) return;
+      if (isSubmitting) return;
+
+      setIsSubmitting(true);
+      setAlreadySavedMessage('');
 
       if (pastedImage) {
-        addItem(pastedImage, selectedBucketId, 'image');
+        const id = addItem(pastedImage, selectedBucketId, 'image');
+        // success
+        setJustSaved(true);
+        if (navigator.vibrate) navigator.vibrate(10);
+        setTimeout(() => setJustSaved(false), 1500);
+        setIsSubmitting(false);
       } else {
-        addItem(inputValue, selectedBucketId, 'url');
+        // Try a quick title and image fetch before creating the item so the item has a good initial title and preview
+        let quickTitle = null;
+        let quickImage = null;
+        try { [quickTitle, quickImage] = await Promise.all([fetchTitleQuick(inputValue, 900), fetchImageQuick(inputValue, 1200)]); } catch (e) { quickTitle = quickTitle || null; quickImage = quickImage || null; }
+
+        const fallbackImage = quickImage || getFavicon(inputValue);
+        const id = addItem(inputValue, selectedBucketId, 'url', quickTitle, fallbackImage);
+
+        // Close capture and show toast for better UX
+        const bucketName = data.buckets.find(b => b.id === selectedBucketId)?.name || 'your space';
+        setModalMode(null);
+        setFlashMessage(`Saved to ${bucketName}`);
+        if (navigator.vibrate) navigator.vibrate(10);
+        const existing = data.items.find(i => i.id === id);
+        if (existing && existing.url === inputValue && (Date.now() - existing.createdAt) > 9000) {
+          // It already existed — inform user briefly
+          setAlreadySavedMessage('This link is already saved');
+          setTimeout(() => setAlreadySavedMessage(''), 1500);
+        } else {
+          // New item
+          setJustSaved(true);
+          if (navigator.vibrate) navigator.vibrate(10);
+          setSavedToast(`Saved to ${data.buckets.find(b => b.id === selectedBucketId)?.name || 'your space'}`);
+          setTimeout(() => setSavedToast(''), 2000);
+          setTimeout(() => setJustSaved(false), 1500);
+        }
+        setIsSubmitting(false);
       }
-      
+
       setInputValue('');
       setPastedImage(null);
       setIsClipboardDetected(false);
       unsavedRef.current = false;
-      setJustSaved(true);
-      setTimeout(() => setJustSaved(false), 1500);
       if (inputRef.current) inputRef.current.focus();
     };
 
@@ -594,15 +887,15 @@ export default function App() {
       <div className="fixed inset-x-0 bottom-0 z-50 animate-in slide-in-from-bottom-10 duration-300">
         <div
           className="fixed inset-0 bg-stone-900/30 backdrop-blur-[2px]"
-          onClick={() => { setModalMode(null); unsavedRef.current = false; }}
+          onClick={() => { setModalMode(null); unsavedRef.current = false; if (navigator.vibrate) navigator.vibrate(5); }}
           onTouchStart={(e) => { touchStartY.current = e.touches[0].clientY; touchDeltaY.current = 0; }}
           onTouchMove={(e) => { if (touchStartY.current != null) touchDeltaY.current = e.touches[0].clientY - touchStartY.current; }}
-          onTouchEnd={() => { if (touchDeltaY.current > 80) { setModalMode(null); unsavedRef.current = false; } touchStartY.current = null; touchDeltaY.current = 0; }}
+          onTouchEnd={() => { if (touchDeltaY.current > 80) { setModalMode(null); unsavedRef.current = false; if (navigator.vibrate) navigator.vibrate(5); } touchStartY.current = null; touchDeltaY.current = 0; }}
         />
         <div className="relative bg-white border-t border-stone-100 shadow-[0_-15px_50px_rgba(0,0,0,0.15)] p-4 pb-10 rounded-t-[2.5rem]">
           <div className="flex justify-between items-center mb-4 px-2">
             <h2 className="text-xs font-bold uppercase tracking-widest text-stone-400">Capture Now</h2>
-            <button onClick={() => setModalMode(null)} className="p-1.5 bg-stone-100 rounded-full text-stone-400"><X size={16} /></button>
+            <button onClick={() => { setModalMode(null); unsavedRef.current = false; if (navigator.vibrate) navigator.vibrate(5); }} className="p-1.5 bg-stone-100 rounded-full text-stone-400"><X size={16} /></button>
           </div>
           
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -612,14 +905,23 @@ export default function App() {
                   <img src={pastedImage} className="h-20 w-auto rounded-lg mx-auto shadow-sm" alt="Pasted" />
                   <button type="button" onClick={() => setPastedImage(null)} className="absolute top-1 right-1 bg-white p-1 rounded-full shadow-md text-stone-500"><X size={14} /></button>
                 </div>
-              ) : (
+              ) : (<>
                 <Input 
                   ref={inputRef}
                   value={inputValue}
                   onChange={(e) => { setInputValue(e.target.value); unsavedRef.current = (e.target.value || '').trim().length > 0; }}
+                  onPaste={(e) => {
+                    const text = e.clipboardData?.getData('text/plain');
+                    if (text && (text.startsWith('http') || text.startsWith('www'))) {
+                      setPastedToast(`Detected link — will save to ${data.buckets.find(b => b.id === selectedBucketId)?.name || 'your space'}`);
+                      setTimeout(() => setPastedToast(''), 2000);
+                    }
+                  }}
                   placeholder="Paste URL or text..." 
                 />
-              )}
+                {pastedToast && <div className="text-xs text-stone-500 mt-2">{pastedToast}</div>}
+                {savedToast && <div className="text-sm text-green-600 mt-2">{savedToast}</div>}
+              </>)}
               {isClipboardDetected && !pastedImage && !inputValue && (
                 <div className="absolute right-3 top-3 flex items-center gap-1 text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded-md">
                   <Clipboard size={10} /> DETECTED
@@ -642,9 +944,10 @@ export default function App() {
               ))}
             </div>
 
-            <Button type="submit" className={`w-full ${justSaved ? 'bg-green-600' : 'bg-stone-900'}`} disabled={!inputValue && !pastedImage}>
-              {justSaved ? <><CheckCircle2 size={18} /> Captured</> : "Capture"}
+            <Button type="submit" className={`w-full ${justSaved ? 'bg-green-600' : 'bg-stone-900'}`} disabled={isSubmitting || (!inputValue && !pastedImage)}>
+              {isSubmitting ? 'Saving...' : (justSaved ? <><CheckCircle2 size={18} /> Captured</> : "Capture")}
             </Button>
+            {alreadySavedMessage && <div className="text-sm text-slate-500 mt-2">{alreadySavedMessage}</div>}
           </form>
         </div>
       </div>
@@ -655,7 +958,7 @@ export default function App() {
 
   if (view === 'home') {
     return (
-      <div className={`min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center ${isNavigating ? 'is-navigating' : ''}`}>
+      <div className={`min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center ${isNavigating ? `is-navigating navigation-${navigationDirection}` : ''}`}>
         <div className="w-full max-w-md min-h-screen flex flex-col relative px-6">
           <header className="pt-16 pb-6">
             <h1 className="text-3xl font-black tracking-tight text-stone-800">Spaces</h1>
@@ -712,6 +1015,7 @@ export default function App() {
             </div>
           )}
           {modalMode === 'item' && <QuickCapture />}
+          <Flash />
         </div>
       </div>
     );
@@ -726,7 +1030,7 @@ export default function App() {
     if (!bucket) return setView('home');
 
     return (
-      <div className={`min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center ${isNavigating ? 'is-navigating' : ''}`}>
+      <div className={`min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center ${isNavigating ? `is-navigating navigation-${navigationDirection}` : ''}`}>
         <div className="w-full max-w-md min-h-screen flex flex-col relative px-4">
           <header className="pt-10 pb-4 flex items-center justify-between sticky top-0 bg-stone-50/90 backdrop-blur-md z-20">
             <button onClick={() => setView('home')} className="p-2 -ml-2 rounded-full hover:bg-stone-200"><ArrowLeft size={24} /></button>
@@ -823,8 +1127,13 @@ export default function App() {
                   >
                     {item.image ? <img src={item.image} className="w-full h-full object-cover" alt="" /> : <span className="text-2xl font-black text-stone-900/10 uppercase">{getInitial(item.title)}</span>}
                     {/* metadata badges */}
-                    <div className="absolute top-2 right-2">
-                      {item.metaStatus === 'pending' && <span className="meta-dot" />}
+                    <div className="absolute top-2 right-2 flex items-center gap-2">
+                      {item.metaStatus === 'pending' && <span className="meta-dot" title="Enriching metadata" />}
+                      {item.metaStatus === 'failed' && (
+                        <div className="meta-failed" title={`Metadata failed (${item.metaAttempts || 0})`}>
+                          <button onClick={(e) => { e.stopPropagation(); updateItem(item.id, { metaStatus: 'pending', metaAttempts: (item.metaAttempts || 0) + 1 }); enrichUrlMetadata(item.id, item.url); }} className="p-1 text-red-500 hover:text-red-700">↻</button>
+                        </div>
+                      )}
                       {item.enrichFlash && <span className="enrich-flash" />}
                     </div>
                   </div>
@@ -892,7 +1201,7 @@ export default function App() {
     if (!item) return setView('bucket');
 
     return (
-      <div className={`min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center ${isNavigating ? 'is-navigating' : ''}`}>
+      <div className={`min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center ${isNavigating ? `is-navigating navigation-${navigationDirection}` : ''}`}>
         <div className="w-full max-w-md min-h-screen bg-white shadow-2xl flex flex-col relative">
           <header className="p-4 flex items-center justify-between border-b border-stone-100 sticky top-0 bg-white/80 backdrop-blur-md z-20">
              <button onClick={() => setView('bucket')} className="p-2 rounded-full hover:bg-stone-100"><ArrowLeft size={24} /></button>
@@ -969,6 +1278,7 @@ export default function App() {
             </div>
           </div>
         </div>
+        <Flash />
       </div>
     );
   }

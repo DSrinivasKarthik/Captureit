@@ -73,6 +73,8 @@ input, textarea {
   background: var(--accent);
   box-shadow: 0 0 0 4px rgba(79,70,229,0.08);
 }
+.meta-failed { display:inline-flex; align-items:center; justify-content:center; }
+.meta-failed button { background: rgba(255,255,255,0.8); border-radius: 6px; padding: 4px; font-weight: 700; }
 .enrich-flash {
   display: inline-block;
   width: 12px;
@@ -89,7 +91,9 @@ input, textarea {
 }
 
 /* Popstate navigation visual */
-.is-navigating { transform: translateY(6px); transition: transform .24s ease, opacity .24s ease; opacity: .98; }
+.is-navigating { transition: transform .24s ease, opacity .24s ease; opacity: .98; }
+.is-navigating.navigation-forward { transform: translateX(-6px); }
+.is-navigating.navigation-back { transform: translateX(6px); }
 .view-transition { transition: transform .24s ease, opacity .24s ease; }
 
 /* Quick capture overlay swipe hint (subtle) */
