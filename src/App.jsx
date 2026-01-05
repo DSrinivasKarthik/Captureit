@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
-import { Plus, ArrowLeft, Trash2, ExternalLink, X, Image as ImageIcon, Link as LinkIcon, CheckCircle2, Clipboard, LayoutGrid, List, Camera, Archive, RotateCcw, PenLine, FileDown, MoreVertical } from 'lucide-react';
+import { Plus, ArrowLeft, Trash2, ExternalLink, X, Image as ImageIcon, Link as LinkIcon, CheckCircle2, Star, XCircle, Clipboard, LayoutGrid, List, Camera, Archive, RotateCcw, PenLine, FileDown, MoreVertical } from 'lucide-react';
 
 // --- UTILS ---
 
@@ -742,7 +742,7 @@ export default function App() {
           .item { background: white; border: 1px solid #e7e5e4; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
           .item-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
           .item-title { font-weight: bold; font-size: 18px; }
-          .status { font-size: 10px; font-weight: 800; text-transform: uppercase; background: #1c1917; color: white; padding: 2px 8px; border-radius: 4px; }
+          .status { font-size: 10px; font-weight: 800; text-transform: uppercase; color: white; padding: 2px 8px; border-radius: 4px; }
           .domain { font-size: 12px; color: #a8a29e; }
           .notes { background: #f5f5f4; padding: 15px; border-radius: 8px; margin-top: 10px; font-size: 14px; white-space: pre-wrap; }
           .footer { margin-top: 60px; font-size: 12px; color: #a8a29e; text-align: center; }
@@ -762,7 +762,7 @@ export default function App() {
                 <div class="item-title">${i.title}</div>
                 <div class="domain">${i.domain}</div>
               </div>
-              <div class="status">${i.status}</div>
+              <div class="status" style="background: ${i.status === 'saved' ? '#059669' : i.status === 'shortlisted' ? '#4f46e5' : '#ef4444'}">${i.status}</div>
             </div>
             ${i.notes ? `<div class="notes"><strong>Thought Log:</strong><br/>${i.notes}</div>` : ''}
           </div>
@@ -1103,7 +1103,9 @@ export default function App() {
                  <p className="small-meta empty-state-title">This space is ready.</p>
               </div>
             )}
-            {activeItems.map(item => (
+            {activeItems.map(item => {
+              const statusAccent = item.status === 'saved' ? 'border-l-4 border-emerald-200' : item.status === 'shortlisted' ? 'border-l-4 border-indigo-200' : 'border-l-4 border-rose-200';
+              return (
               <div
                 key={item.id}
                 draggable="true"
@@ -1119,7 +1121,7 @@ export default function App() {
                     setActiveItemId(item.id); 
                     setView('item'); 
                   }}
-                  className={`w-full bg-white rounded-2xl overflow-hidden shadow-sm border border-stone-100 active:scale-[0.98] transition-all text-left flex item-card ${isCompact ? 'flex-col' : 'flex-row h-24'}`}
+                  className={`w-full bg-white rounded-2xl overflow-hidden shadow-sm border border-stone-100 active:scale-[0.98] transition-all text-left flex item-card ${isCompact ? 'flex-col' : 'flex-row h-24'} ${statusAccent}`}
                 >
                   <div 
                     className={`relative overflow-hidden shrink-0 flex items-center justify-center ${isCompact ? 'aspect-[4/3] w-full' : 'w-24 h-full'} ${item.image ? '' : 'no-image'}`}
@@ -1128,6 +1130,10 @@ export default function App() {
                     {item.image ? <img src={item.image} className="w-full h-full object-cover" alt="" /> : <span className="text-2xl font-black text-stone-900/10 uppercase">{getInitial(item.title)}</span>}
                     {/* metadata badges */}
                     <div className="absolute top-2 right-2 flex items-center gap-2">
+                      <span className={`text-xs font-bold uppercase px-2 py-1 rounded-full ${item.status === 'saved' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : item.status === 'shortlisted' ? 'bg-indigo-50 text-indigo-700 border border-indigo-100' : 'bg-rose-50 text-rose-700 border border-rose-100'}`}>
+                        {item.status}
+                      </span>
+                      {item.statusFlash && <span className={`w-3 h-3 rounded-full ${item.status === 'saved' ? 'bg-emerald-500' : item.status === 'shortlisted' ? 'bg-indigo-500' : 'bg-rose-500'} animate-ping`} /> }
                       {item.metaStatus === 'pending' && <span className="meta-dot" title="Enriching metadata" />}
                       {item.metaStatus === 'failed' && (
                         <div className="meta-failed" title={`Metadata failed (${item.metaAttempts || 0})`}>
@@ -1146,7 +1152,8 @@ export default function App() {
                   </div>
                 </button>
               </div>
-            ))}
+              );
+            })} 
 
             {/* Local Archive Toggle */}
             {archivedItems.length > 0 && (
@@ -1198,6 +1205,22 @@ export default function App() {
     const item = data.items.find(i => i.id === activeItemId);
     const showNudge = item?.visitCount >= 3 && !item?.notes;
 
+    const statusButtonClass = (statusName) => {
+      if (statusName === 'saved') {
+        return item.status === 'saved'
+          ? 'bg-emerald-600 border-emerald-600 text-white shadow-lg scale-105'
+          : 'bg-white border-stone-100 text-stone-400 hover:bg-emerald-50 hover:text-emerald-700';
+      } else if (statusName === 'shortlisted') {
+        return item.status === 'shortlisted'
+          ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg scale-105'
+          : 'bg-white border-stone-100 text-stone-400 hover:bg-indigo-50 hover:text-indigo-700';
+      } else {
+        return item.status === 'rejected'
+          ? 'bg-rose-600 border-rose-600 text-white shadow-lg scale-105'
+          : 'bg-white border-stone-100 text-stone-400 hover:bg-rose-50 hover:text-rose-700';
+      }
+    };
+
     if (!item) return setView('bucket');
 
     return (
@@ -1246,17 +1269,18 @@ export default function App() {
               <div className="space-y-4">
                  <label className="text-[10px] font-black text-stone-300 uppercase tracking-widest">Decision Status</label>
                  <div className="flex gap-2">
-                    {['saved', 'shortlisted', 'rejected'].map(status => (
-                      <button
-                        key={status}
-                        onClick={() => updateItem(item.id, { status })}
-                        className={`flex-1 py-3 rounded-2xl text-xs font-bold transition-all border ${
-                          item.status === status ? 'bg-stone-900 border-stone-900 text-white shadow-lg scale-105' : 'bg-white border-stone-100 text-stone-400'
-                        }`}
-                      >
-                        {status.toUpperCase()}
-                      </button>
-                    ))}
+                    {['saved','shortlisted','rejected'].map(status => {
+                      const icon = status === 'saved' ? <CheckCircle2 size={14} /> : status === 'shortlisted' ? <Star size={14} /> : <XCircle size={14} />;
+                      return (
+                        <button
+                          key={status}
+                          onClick={() => { updateItem(item.id, { status, statusFlash: true }); setTimeout(() => updateItem(item.id, { statusFlash: false }), 700); }}
+                          className={`flex-1 py-3 rounded-2xl text-xs font-bold transition-all border ${statusButtonClass(status)}`}
+                        >
+                          <span className="flex items-center justify-center gap-2">{icon}<span className="hidden sm:inline">{status.toUpperCase()}</span></span>
+                        </button>
+                      );
+                    })}
                  </div>
               </div>
 
