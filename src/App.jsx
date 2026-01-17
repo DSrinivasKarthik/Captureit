@@ -465,6 +465,66 @@ export default function App() {
   const [showArchive, setShowArchive] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [editingIntent, setEditingIntent] = useState(false);
+
+  // --- Preview / Quick View (hover on desktop, long-press on mobile) ---
+  const [previewItem, setPreviewItem] = useState(null);
+  const [previewMode, setPreviewMode] = useState(null); // 'peek' | 'quick'
+  const [previewPos, setPreviewPos] = useState({ x: 0, y: 0 });
+  const previewHideTimer = useRef(null);
+  const longPressTimer = useRef(null);
+  const longPressActivated = useRef(false);
+  const quickCloseRef = useRef(null);
+
+  const showPeekPreview = (item, rect) => {
+    if (!item) return;
+    if (window.matchMedia && window.matchMedia('(hover: none)').matches) return; // don't show peek on touch-only devices
+    if (previewHideTimer.current) { clearTimeout(previewHideTimer.current); previewHideTimer.current = null; }
+    setPreviewItem(item);
+    setPreviewMode('peek');
+
+    // prefer showing to the right, but clamp inside viewport
+    const width = Math.min(300, Math.max(220, Math.round(window.innerWidth * 0.33)));
+    const left = Math.min(Math.max(8, rect.right + 12), window.innerWidth - width - 12);
+    const top = Math.max(8, rect.top);
+    setPreviewPos({ x: left, y: top });
+  };
+
+  const hidePeekPreview = (delay = 120) => {
+    if (previewHideTimer.current) clearTimeout(previewHideTimer.current);
+    previewHideTimer.current = setTimeout(() => {
+      if (previewMode === 'peek') {
+        setPreviewItem(null);
+        setPreviewMode(null);
+      }
+    }, delay);
+  };
+
+  const startLongPress = (item, rect) => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = setTimeout(() => {
+      longPressActivated.current = true;
+      setPreviewItem(item);
+      setPreviewMode('quick');
+      setPreviewPos({ x: rect.left, y: rect.top });
+      // focus close button after render
+      setTimeout(() => quickCloseRef.current?.focus?.(), 10);
+      // reset activation flag shortly after to avoid interfering with taps
+      setTimeout(() => { longPressActivated.current = false; }, 800);
+    }, 520);
+  };
+  const cancelLongPress = () => { if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; } };
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (previewMode === 'quick' && e.key === 'Escape') {
+        setPreviewItem(null);
+        setPreviewMode(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [previewMode]);
+
   // small global flash for transient messages
   const [flash, setFlash] = useState('');
   const setFlashMessage = (msg, ttl = 2200) => { setFlash(msg); if (msg) setTimeout(() => setFlash(''), ttl); };
@@ -1125,12 +1185,24 @@ export default function App() {
                 className={`transition-all ${draggedItemId === item.id ? 'scale-95' : ''}`}
               >
                 <button
-                  onClick={() => { 
+                  onClick={(e) => { 
+                    // if long-press opened a quick view, suppress the following navigation click
+                    if (longPressActivated.current) { longPressActivated.current = false; e.stopPropagation(); return; }
                     updateItem(item.id, { visitCount: (item.visitCount || 0) + 1 });
                     setActiveItemId(item.id); 
                     setView('item'); 
                   }}
+                  onMouseEnter={(e) => { try { showPeekPreview(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} }}
+                  onMouseMove={(e) => { if (previewMode === 'peek' && previewItem?.id === item.id) { try { showPeekPreview(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} } }}
+                  onMouseLeave={() => hidePeekPreview()}
+                  onFocus={(e) => { try { showPeekPreview(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} }}
+                  onBlur={() => hidePeekPreview()}
+                  onPointerDown={(e) => { if (e.pointerType === 'touch' || e.pointerType === 'pen') { try { startLongPress(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} } }}
+                  onPointerUp={() => { cancelLongPress(); }}
+                  onPointerCancel={() => { cancelLongPress(); hidePeekPreview(); }}
+                  onPointerLeave={() => { cancelLongPress(); hidePeekPreview(); }}
                   className={`w-full bg-white rounded-2xl overflow-hidden shadow-sm border border-stone-100 active:scale-[0.98] transition-all text-left flex item-card ${isCompact ? 'flex-col' : 'flex-row h-24'} ${statusAccent}`}
+                  aria-describedby={previewItem?.id === item.id && previewMode === 'peek' ? 'preview-popover' : undefined}
                 >
                   <div 
                     className={`relative overflow-hidden shrink-0 flex items-center justify-center ${isCompact ? 'aspect-[4/3] w-full' : 'w-24 h-full'} ${item.image ? '' : 'no-image'}`}
@@ -1163,6 +1235,42 @@ export default function App() {
               </div>
               );
             })} 
+
+            {/* Preview popover / quick modal (hover on desktop, long-press on mobile) */}
+            {previewItem && previewMode === 'peek' && (
+              <div id="preview-popover" role="dialog" aria-label="Preview" className="preview-popover" style={{ left: previewPos.x, top: previewPos.y }} onMouseEnter={() => { if (previewHideTimer.current) clearTimeout(previewHideTimer.current); }} onMouseLeave={() => hidePeekPreview(60)}>
+                <div className="preview-media" style={{ background: previewItem.image ? 'transparent' : generateGradient(previewItem.url || previewItem.title || previewItem.domain) }}>
+                  {previewItem.image ? <img src={previewItem.image} alt="Preview"/> : <span className="preview-initial">{getInitial(previewItem.title)}</span>}
+                </div>
+                <div className="preview-body">
+                  <div className="preview-title">{previewItem.title}</div>
+                  <div className="preview-domain"><img src={getFavicon(previewItem.url)} alt="" className="fav" /> <span className="truncate">{previewItem.domain}</span></div>
+                  <div className="preview-actions">
+                    <button onClick={() => { setPreviewItem(null); setPreviewMode(null); setActiveItemId(previewItem.id); setView('item'); }} className="btn-ghost">Open</button>
+                    <a href={previewItem.url || '#'} target="_blank" rel="noreferrer" className="btn-ghost">Visit</a>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {previewItem && previewMode === 'quick' && (
+              <div className="preview-modal" role="dialog" aria-modal="true" onClick={() => { setPreviewItem(null); setPreviewMode(null); }}>
+                <div className="preview-modal-content" onClick={(e) => e.stopPropagation()}>
+                  <button ref={quickCloseRef} className="modal-close" aria-label="Close preview" onClick={() => { setPreviewItem(null); setPreviewMode(null); }}>✕</button>
+                  <div className="modal-media">
+                    {previewItem.image ? <img src={previewItem.image} alt="Preview" /> : <div className="modal-initial" style={{ background: generateGradient(previewItem.title || previewItem.domain) }}>{getInitial(previewItem.title)}</div>}
+                  </div>
+                  <div className="modal-body">
+                    <h2 className="modal-title">{previewItem.title}</h2>
+                    <p className="modal-domain"><img src={getFavicon(previewItem.url)} alt="" className="fav"/> {previewItem.domain}</p>
+                    <div className="modal-actions">
+                      <button className="btn-primary" onClick={() => { setActiveItemId(previewItem.id); setView('item'); setPreviewItem(null); setPreviewMode(null); }}>Open</button>
+                      {previewItem.url && <a className="btn-ghost" href={previewItem.url} target="_blank" rel="noreferrer">Visit</a>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Local Archive Toggle */}
             {archivedItems.length > 0 && (
