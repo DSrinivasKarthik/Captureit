@@ -6,6 +6,9 @@ import { Plus, ArrowLeft, Trash2, ExternalLink, X, Image as ImageIcon, Link as L
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
+// METADATA PROXY URL - defined at module level so all functions can access it
+const METADATA_PROXY = window.__METADATA_PROXY_URL || 'http://localhost:4000/fetch?url=';
+
 const getDomain = (url) => {
   try {
     const domain = new URL(url).hostname;
@@ -149,10 +152,10 @@ const fetchJsonWithTimeout = async (url, timeout = 1500) => {
 
 const fetchPageMetadata = async (url) => {
   try {
-    // Try fast proxy first when it's local (low latency), else try direct fetch with a short timeout
-    if (METADATA_PROXY && METADATA_PROXY.includes('localhost')) {
+    // Prefer metadata proxy whenever available (avoids CORS and improves preview accuracy)
+    if (METADATA_PROXY) {
       try {
-        const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), 1200);
+        const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), 2600);
         if (json) {
           if (json.image) {
             // require reasonable resolution for proxy images
@@ -281,7 +284,7 @@ const fetchTitleQuick = async (url, timeout = 1000) => {
     // Prefer a fast proxy when available
     if (METADATA_PROXY) {
       try {
-        const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), Math.min(timeout, 800));
+        const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), Math.min(timeout + 1200, 2200));
         if (json && json.title) return extractBestTitle(json.title, url);
       } catch (e) { /* ignore proxy failure */ }
     }
@@ -308,7 +311,7 @@ const fetchImageQuick = async (url, timeout = 1200) => {
   try {
     if (METADATA_PROXY) {
       try {
-        const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), Math.min(timeout, 900));
+        const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), Math.min(timeout + 1400, 2400));
         if (json && json.image) {
           const ok = await loadImageWithTimeout(json.image, 1200, 200, 120);
           if (ok) return json.image;
@@ -348,7 +351,7 @@ const fetchImageQuick = async (url, timeout = 1200) => {
 
 const enrichUrlMetadata = async (id, url) => {
   try {
-    const cacheKey = 'meta_cache_v1';
+    const cacheKey = 'meta_cache_v2';
     const cache = JSON.parse(localStorage.getItem(cacheKey) || '{}');
 
     // initialize attempt counter
@@ -652,8 +655,7 @@ export default function App() {
 
   // --- ACTIONS ---
 
-  // Load proxy URL from global (optional) or fallback
-  const METADATA_PROXY = window.__METADATA_PROXY_URL || 'http://localhost:4000/fetch?url=';
+  // METADATA_PROXY is now defined at module level (top of file)
   // Track URLs currently being added to prevent race duplicates
   const pendingUrlsRef = useRef(new Set());
 
