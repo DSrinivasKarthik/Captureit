@@ -1,6 +1,7 @@
 # storeitnow
 
 A web application for collecting and organizing links and images with automatic metadata extraction.
+Save your links from various sites into specific buckets and use for decision making.
 
 ## Overview
 
