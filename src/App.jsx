@@ -1072,7 +1072,7 @@ export default function App() {
           <div className="w-full flex justify-center mt-6 pb-6">
             <a href="https://github.com/DSrinivasKarthik" target="_blank" rel="noreferrer" className="text-xs text-stone-400 hover:text-stone-600 transition-colors flex items-center gap-3">
               <span className="text-lg">🐙</span>
-              <span>Made with <span className="text-rose-500">♥</span> by <span className="font-bold text-stone-700">DSK</span> — <span className="underline decoration-indigo-200 decoration-2 rounded-sm px-1">github.com/DSrinivasKarthik</span></span>
+              <span>Made with <span className="text-rose-500">♥</span> by <span className="font-bold text-stone-700">DSK</span></span>
             </a>
           </div>
 
