@@ -39,66 +39,31 @@ const generateGradient = (str) => {
 
 // --- Metadata & Title inference helpers ---
 
-const normalizeTitle = (raw, domain) => {
+// Simple title cleanup - just trim whitespace and normalize spaces, keep the full title
+const normalizeTitle = (raw) => {
   if (!raw) return null;
-  let title = String(raw).toLowerCase();
-
-  // remove content after separators like "|" commonly used for site suffix
-  title = title.replace(/\|.*$/,'');
-
-  // Remove site tokens
-  if (domain) {
-    const site = domain.replace(/^www\./, '').replace(/\.(com|in|co|org|net)$/,'');
-    try { title = title.replace(new RegExp(site, 'g'), ''); } catch(e) {}
-  }
-
-  // Remove common boilerplate words
-  const boilerplate = ['price','images','mileage','specs','features','overview','review','reviews','news','blogs','blog','updated','latest','model','india','official','on-road','on road'];
-  boilerplate.forEach(w => {
-    title = title.replace(new RegExp('\\b' + w + '\\b','g'), '');
-  });
-
-  // Replace various separators with space
-  title = title.replace(/[-|•:\/]/g, ' ');
-
-  // Remove duplicate tokens (preserve order)
-  const seen = new Set();
-  title = title.split(/\s+/).filter(Boolean).filter(w => {
-    if (seen.has(w)) return false; seen.add(w); return true;
-  }).join(' ');
-
-  // Clean spacing and trim
-  title = title.replace(/\s+/g, ' ').trim();
-  if (!title) return null;
-
-  // Capitalize words
-  title = title.replace(/\b\w/g, c => c.toUpperCase());
-
-  // Length guard
-  if (title.length < 3) return null;
-
+  let title = String(raw).replace(/\s+/g, ' ').trim();
+  if (!title || title.length < 2) return null;
   return title;
 };
 
+// Fallback: infer a readable title from URL path (used only when page title unavailable)
 const inferTitleFromUrl = (url) => {
   try {
-    const ignore = ['blogs','blog','news','reviews','colors','specs','gallery','images','price','posts','category','categories','tag','tags'];
-    const parts = new URL(url).pathname.split('/').filter(Boolean).filter(p => !ignore.includes(p.toLowerCase()));
-
-    if (parts.length >= 2) {
-      const brand = parts[parts.length - 2];
-      const model = parts[parts.length - 1];
-      const combined = `${brand} ${model}`.replace(/[-_]/g, ' ');
-      return normalizeTitle(combined, new URL(url).hostname);
-    }
-
-    if (parts.length === 1) {
-      const candidate = parts[0].replace(/[-_]/g, ' ');
-      return normalizeTitle(candidate, new URL(url).hostname);
-    }
-
-    return null;
-  } catch (e) {
+    const parts = new URL(url).pathname.split('/').filter(Boolean);
+    if (parts.length === 0) return new URL(url).hostname;
+    
+    // Take the last meaningful path segment
+    const last = parts[parts.length - 1]
+      .replace(/[-_]/g, ' ')
+      .replace(/\.\w+$/, '') // remove file extensions
+      .trim();
+    
+    if (!last || last.length < 2) return new URL(url).hostname;
+    
+    // Title case
+    return last.replace(/\b\w/g, c => c.toUpperCase());
+  } catch {
     return null;
   }
 };
@@ -162,7 +127,7 @@ const fetchPageMetadata = async (url) => {
             const ok = await loadImageWithTimeout(json.image, 2000, 200, 120);
             if (!ok) json.image = null;
           }
-          const title = normalizeTitle(json?.title || '', new URL(url).hostname) || null;
+          const title = normalizeTitle(json?.title) || null;
           return { title, image: json?.image || null };
         }
       } catch (e) { /* fall through to direct fetch */ }
@@ -196,7 +161,7 @@ const fetchPageMetadata = async (url) => {
     }
 
     const rawTitle = ogTitle || metaTitle || description;
-    const title = normalizeTitle(rawTitle, new URL(url).hostname) || null;
+    const title = normalizeTitle(rawTitle) || null;
     return { title, image: ogImage || null };
   } catch (err) {
     // try proxy fallback (r.jina.ai as a lightweight fetch proxy)
@@ -211,7 +176,7 @@ const fetchPageMetadata = async (url) => {
               const ok = await loadImageWithTimeout(json.image, 2500);
               if (!ok) json.image = null;
             }
-            const title = normalizeTitle(json?.title || '', new URL(url).hostname) || null;
+            const title = normalizeTitle(json?.title) || null;
             return { title, image: json?.image || null };
           }
         } catch (e) { /* continue to jina */ }
@@ -240,7 +205,7 @@ const fetchPageMetadata = async (url) => {
       }
 
       const rawTitle = ogTitle || metaTitle;
-      const title = normalizeTitle(rawTitle, new URL(url).hostname) || null;
+      const title = normalizeTitle(rawTitle) || null;
       return { title, image: ogImage || null };
     } catch (err2) {
       // failed enrichment
@@ -249,34 +214,9 @@ const fetchPageMetadata = async (url) => {
   }
 };
 
-// Quick title extraction and cleaning for faster captures
-const extractBestTitle = (rawTitle, url) => {
-  if (!rawTitle) return null;
-  // Normalize whitespace
-  let t = String(rawTitle).replace(/\s+/g, ' ').trim();
-  // Remove noisy prefixes like "Home -" or "Welcome:"
-  t = t.replace(/^(home|welcome|index|untitled|page)\s*[\-:|—]\s*/i, '');
-  // split on common separators and prefer the most meaningful segment
-  const parts = t.split(/[|\-—:]/).map(p => p.trim()).filter(Boolean);
-  // remove common noisy words
-  const cleaned = parts.filter(p => !/^(home|index|welcome|untitled|page)\b/i.test(p));
-  const candidateParts = cleaned.length ? cleaned : parts;
-  // choose the longest segment (usually the most descriptive)
-  let chosen = candidateParts.reduce((a, b) => (a && a.length >= b.length ? a : b), candidateParts[0]);
-
-  // Further strip trailing site tokens (e.g., " - GitHub Blog" or " | GitHub")
-  try {
-    const domain = new URL(url).hostname.replace(/^www\./, '');
-    const siteToken = domain.split('.')[0];
-    const siteRegex = new RegExp('\\b' + siteToken + '\\b', 'i');
-    if (siteRegex.test(chosen)) {
-      chosen = chosen.replace(siteRegex, '').trim();
-    }
-  } catch (e) { /* ignore */ }
-
-  // fallback to normalized title
-  const out = normalizeTitle(chosen, (() => { try { return new URL(url).hostname; } catch(e){ return ''; } })());
-  return out || null;
+// Quick title extraction - just clean up whitespace, keep the full page title
+const extractBestTitle = (rawTitle) => {
+  return normalizeTitle(rawTitle);
 };
 
 const fetchTitleQuick = async (url, timeout = 1000) => {
@@ -285,7 +225,7 @@ const fetchTitleQuick = async (url, timeout = 1000) => {
     if (METADATA_PROXY) {
       try {
         const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), Math.min(timeout + 1200, 2200));
-        if (json && json.title) return extractBestTitle(json.title, url);
+        if (json && json.title) return extractBestTitle(json.title);
       } catch (e) { /* ignore proxy failure */ }
     }
 
@@ -298,7 +238,7 @@ const fetchTitleQuick = async (url, timeout = 1000) => {
       if (!res.ok) throw new Error('Network');
       const txt = await res.text();
       const m = txt.match(/<title[^>]*>([^<]+)<\/title>/i);
-      if (m && m[1]) return extractBestTitle(m[1], url);
+      if (m && m[1]) return extractBestTitle(m[1]);
     } catch (e) {
       clearTimeout(id);
     }
@@ -705,7 +645,7 @@ export default function App() {
 
     // Layer 2: prefer an already-provided title (quick fetch), else infer from URL
     const inferredTitle = isUrl ? (initialTitle || inferTitleFromUrl(content)) : null;
-    const normalizedInferred = isUrl ? normalizeTitle(inferredTitle || '', site) : null;
+    const normalizedInferred = isUrl ? normalizeTitle(inferredTitle) : null;
     const initialTitleToUse = isUrl ? (normalizedInferred || 'Untitled link') : 'Pasted Image';
 
     const id = generateId();
