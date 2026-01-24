@@ -115,8 +115,50 @@ const fetchJsonWithTimeout = async (url, timeout = 1500) => {
   }
 };
 
+// --- YouTube-specific metadata (title + thumbnail) via oEmbed ---
+
+const isYouTubeUrl = (url) => {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    if (host === 'youtu.be') return true;
+    if (host === 'youtube.com' || host === 'm.youtube.com') return true;
+    if (host.endsWith('.youtube.com')) return true;
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+const fetchYouTubeMetadata = async (url) => {
+  if (!isYouTubeUrl(url)) return null;
+  try {
+    const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
+    const res = await fetch(oembedUrl);
+    if (!res.ok) return null;
+    const json = await res.json();
+
+    const title = normalizeTitle(json?.title) || null;
+    let image = json?.thumbnail_url || null;
+    if (image) {
+      const ok = await loadImageWithTimeout(image, 3000, 200, 120);
+      if (!ok) image = null;
+    }
+
+    if (!title && !image) return null;
+    return { title, image };
+  } catch {
+    return null;
+  }
+};
+
 const fetchPageMetadata = async (url) => {
   try {
+    // YouTube: use oEmbed which reliably exposes video title + thumbnail
+    const ytMeta = await fetchYouTubeMetadata(url);
+    if (ytMeta) return ytMeta;
+
     // Prefer metadata proxy whenever available (avoids CORS and improves preview accuracy)
     if (METADATA_PROXY) {
       try {
@@ -221,6 +263,10 @@ const extractBestTitle = (rawTitle) => {
 
 const fetchTitleQuick = async (url, timeout = 1000) => {
   try {
+    // YouTube: use oEmbed directly for fast, accurate titles
+    const ytMeta = await fetchYouTubeMetadata(url);
+    if (ytMeta?.title) return ytMeta.title;
+
     // Prefer a fast proxy when available
     if (METADATA_PROXY) {
       try {
@@ -249,6 +295,10 @@ const fetchTitleQuick = async (url, timeout = 1000) => {
 // Quick image extraction for faster initial preview (tries proxy then quick DOM scan)
 const fetchImageQuick = async (url, timeout = 1200) => {
   try {
+    // YouTube: use oEmbed thumbnail rather than a generic logo
+    const ytMeta = await fetchYouTubeMetadata(url);
+    if (ytMeta?.image) return ytMeta.image;
+
     if (METADATA_PROXY) {
       try {
         const json = await fetchJsonWithTimeout(METADATA_PROXY + encodeURIComponent(url), Math.min(timeout + 1400, 2400));
