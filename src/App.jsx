@@ -1167,7 +1167,12 @@ export default function App() {
                     </div>
                   </div>
                   <div className={`p-3 flex flex-col justify-center min-w-0 ${isCompact ? '' : 'flex-1'}`}>
-                    <h3 className={`font-bold text-stone-800 leading-tight truncate ${isCompact ? 'text-sm' : 'text-base'}`}>{item.title}</h3>
+                    <h3
+                      className={`font-bold text-stone-800 leading-tight ${isCompact ? 'text-sm' : 'text-base'}`}
+                      title={item.title}
+                    >
+                      {item.title}
+                    </h3>
                     <p className="text-[10px] text-stone-400 font-bold uppercase mt-1 flex items-center gap-1">
                       {item.url ? <img src={getFavicon(item.url)} className="w-3 h-3 rounded-sm" /> : <Camera size={10} />}
                       <span className="truncate">{item.domain}</span>
