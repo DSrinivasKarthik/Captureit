@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
-import { Plus, ArrowLeft, Trash2, ExternalLink, X, Image as ImageIcon, Link as LinkIcon, CheckCircle2, Star, XCircle, Clipboard, LayoutGrid, List, Camera, Archive, RotateCcw, PenLine, FileDown, MoreVertical } from 'lucide-react';
+import { Plus, ArrowLeft, Trash2, ExternalLink, X, Image as ImageIcon, Link as LinkIcon, CheckCircle2, Star, XCircle, Clipboard, LayoutGrid, List, Camera, Archive, RotateCcw, PenLine, FileDown, MoreVertical, CheckSquare, Square, Move } from 'lucide-react';
 
 // --- UTILS ---
 
@@ -458,6 +458,9 @@ export default function App() {
   const [showArchive, setShowArchive] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [editingIntent, setEditingIntent] = useState(false);
+  const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
+  const [selectedItemIds, setSelectedItemIds] = useState(new Set());
+  const [showBulkMoveModal, setShowBulkMoveModal] = useState(false);
 
   // --- Preview / Quick View (hover on desktop, long-press on mobile) ---
   const [previewItem, setPreviewItem] = useState(null);
@@ -762,6 +765,56 @@ export default function App() {
     }));
     setView('home');
     setShowSettings(false);
+  };
+
+  // Multi-select functions
+  const toggleMultiSelectMode = () => {
+    setIsMultiSelectMode(!isMultiSelectMode);
+    setSelectedItemIds(new Set());
+  };
+
+  const toggleItemSelection = (itemId) => {
+    setSelectedItemIds(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(itemId)) {
+        newSet.delete(itemId);
+      } else {
+        newSet.add(itemId);
+      }
+      return newSet;
+    });
+  };
+
+  const selectAllItems = (items) => {
+    setSelectedItemIds(new Set(items.map(i => i.id)));
+  };
+
+  const clearSelection = () => {
+    setSelectedItemIds(new Set());
+  };
+
+  const bulkArchiveItems = () => {
+    selectedItemIds.forEach(id => updateItem(id, { isArchived: true }));
+    setSelectedItemIds(new Set());
+    setIsMultiSelectMode(false);
+    setFlashMessage(`Archived ${selectedItemIds.size} item${selectedItemIds.size > 1 ? 's' : ''}`);
+  };
+
+  const bulkDeleteItems = () => {
+    if (!window.confirm(`Permanently delete ${selectedItemIds.size} item${selectedItemIds.size > 1 ? 's' : ''}?`)) return;
+    selectedItemIds.forEach(id => deleteItemPermanently(id));
+    setSelectedItemIds(new Set());
+    setIsMultiSelectMode(false);
+    setFlashMessage(`Deleted ${selectedItemIds.size} item${selectedItemIds.size > 1 ? 's' : ''}`);
+  };
+
+  const bulkMoveItems = (targetBucketId) => {
+    selectedItemIds.forEach(id => updateItem(id, { bucketId: targetBucketId }));
+    const bucketName = data.buckets.find(b => b.id === targetBucketId)?.name || 'bucket';
+    setFlashMessage(`Moved ${selectedItemIds.size} item${selectedItemIds.size > 1 ? 's' : ''} to ${bucketName}`);
+    setSelectedItemIds(new Set());
+    setIsMultiSelectMode(false);
+    setShowBulkMoveModal(false);
   };
 
   const reorderItems = (draggedId, targetId) => {
@@ -1097,6 +1150,15 @@ export default function App() {
             <button onClick={() => setView('home')} className="p-2 -ml-2 rounded-full hover:bg-stone-200"><ArrowLeft size={24} /></button>
             <h1 className="text-lg font-bold flex items-center gap-2"><span>{bucket.emoji}</span> {bucket.name}</h1>
             <div className="flex items-center gap-1 relative">
+              <button 
+                onClick={toggleMultiSelectMode} 
+                className={`p-2 rounded-full hover:bg-stone-200 transition-colors ${
+                  isMultiSelectMode ? 'bg-blue-100 text-blue-600' : 'text-stone-400'
+                }`}
+                title="Multi-select"
+              >
+                {isMultiSelectMode ? <CheckSquare size={20} /> : <Square size={20} />}
+              </button>
               <button onClick={() => toggleBucketDensity(bucket.id)} className="p-2 rounded-full hover:bg-stone-200 text-stone-400">
                 {isCompact ? <LayoutGrid size={20} /> : <List size={20} />}
               </button>
@@ -1166,36 +1228,50 @@ export default function App() {
             )}
             {activeItems.map(item => {
               const statusAccent = item.status === 'saved' ? 'border-l-4 border-emerald-200' : item.status === 'shortlisted' ? 'border-l-4 border-indigo-200' : 'border-l-4 border-rose-200';
+              const isSelected = selectedItemIds.has(item.id);
               return (
               <div
                 key={item.id}
-                draggable="true"
+                draggable={!isMultiSelectMode}
                 onDragStart={(e) => { setDraggedItemId(item.id); e.currentTarget.style.opacity = '0.5'; }}
                 onDragEnd={(e) => { setDraggedItemId(null); e.currentTarget.style.opacity = '1'; }}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => { e.preventDefault(); if (draggedItemId) reorderItems(draggedItemId, item.id); }}
-                className={`transition-all ${draggedItemId === item.id ? 'scale-95' : ''}`}
+                className={`transition-all ${draggedItemId === item.id ? 'scale-95' : ''} ${isSelected ? 'ring-2 ring-blue-500' : ''}`}
               >
                 <button
                   onClick={(e) => { 
+                    if (isMultiSelectMode) {
+                      toggleItemSelection(item.id);
+                      return;
+                    }
                     // if long-press opened a quick view, suppress the following navigation click
                     if (longPressActivated.current) { longPressActivated.current = false; e.stopPropagation(); return; }
                     updateItem(item.id, { visitCount: (item.visitCount || 0) + 1 });
                     setActiveItemId(item.id); 
                     setView('item'); 
                   }}
-                  onMouseEnter={(e) => { try { showPeekPreview(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} }}
-                  onMouseMove={(e) => { if (previewMode === 'peek' && previewItem?.id === item.id) { try { showPeekPreview(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} } }}
-                  onMouseLeave={() => hidePeekPreview()}
-                  onFocus={(e) => { try { showPeekPreview(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} }}
-                  onBlur={() => hidePeekPreview()}
-                  onPointerDown={(e) => { if (e.pointerType === 'touch' || e.pointerType === 'pen') { try { startLongPress(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} } }}
-                  onPointerUp={() => { cancelLongPress(); }}
-                  onPointerCancel={() => { cancelLongPress(); hidePeekPreview(); }}
-                  onPointerLeave={() => { cancelLongPress(); hidePeekPreview(); }}
-                  className={`w-full bg-white rounded-2xl overflow-hidden shadow-sm border border-stone-100 active:scale-[0.98] transition-all text-left flex item-card ${isCompact ? 'flex-col' : 'flex-row h-24'} ${statusAccent}`}
+                  onMouseEnter={(e) => { if (!isMultiSelectMode) { try { showPeekPreview(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} } }}
+                  onMouseMove={(e) => { if (!isMultiSelectMode && previewMode === 'peek' && previewItem?.id === item.id) { try { showPeekPreview(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} } }}
+                  onMouseLeave={() => { if (!isMultiSelectMode) hidePeekPreview(); }}
+                  onFocus={(e) => { if (!isMultiSelectMode) { try { showPeekPreview(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} } }}
+                  onBlur={() => { if (!isMultiSelectMode) hidePeekPreview(); }}
+                  onPointerDown={(e) => { if (!isMultiSelectMode && (e.pointerType === 'touch' || e.pointerType === 'pen')) { try { startLongPress(item, e.currentTarget.getBoundingClientRect()); } catch(e) {} } }}
+                  onPointerUp={() => { if (!isMultiSelectMode) cancelLongPress(); }}
+                  onPointerCancel={() => { if (!isMultiSelectMode) { cancelLongPress(); hidePeekPreview(); } }}
+                  onPointerLeave={() => { if (!isMultiSelectMode) { cancelLongPress(); hidePeekPreview(); } }}
+                  className={`w-full bg-white rounded-2xl overflow-hidden shadow-sm border border-stone-100 active:scale-[0.98] transition-all text-left flex item-card ${isCompact ? 'flex-col' : 'flex-row h-24'} ${statusAccent} ${isSelected ? 'bg-blue-50' : ''}`}
                   aria-describedby={previewItem?.id === item.id && previewMode === 'peek' ? 'preview-popover' : undefined}
                 >
+                  {isMultiSelectMode && (
+                    <div className="absolute top-2 left-2 z-10">
+                      <div className={`w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all ${
+                        isSelected ? 'bg-blue-600 border-blue-600' : 'bg-white border-stone-300'
+                      }`}>
+                        {isSelected && <CheckCircle2 size={16} className="text-white" />}
+                      </div>
+                    </div>
+                  )}
                   <div 
                     className={`relative overflow-hidden shrink-0 flex items-center justify-center ${isCompact ? 'aspect-[4/3] w-full' : 'w-24 h-full'} ${item.image ? '' : 'no-image'}`}
                     style={{ background: item.image ? 'transparent' : generateGradient(item.url || item.title || item.domain) }}
@@ -1301,6 +1377,88 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {/* Multi-select bulk actions toolbar */}
+          {isMultiSelectMode && (
+            <div className="fixed bottom-32 left-0 right-0 flex justify-center z-10">
+              <div className="bg-white rounded-2xl shadow-2xl border border-stone-200 p-3 flex flex-col gap-2 min-w-[280px]">
+                <div className="flex items-center justify-between px-2 pb-2 border-b border-stone-100">
+                  <span className="text-sm font-bold text-stone-700">
+                    {selectedItemIds.size > 0 ? `${selectedItemIds.size} selected` : 'Select items'}
+                  </span>
+                  <div className="flex gap-1">
+                    {selectedItemIds.size > 0 && selectedItemIds.size < activeItems.length && (
+                      <button 
+                        onClick={() => selectAllItems(activeItems)}
+                        className="text-xs text-blue-600 hover:text-blue-700 font-medium px-2 py-1"
+                      >
+                        Select All
+                      </button>
+                    )}
+                    {selectedItemIds.size > 0 && (
+                      <button 
+                        onClick={clearSelection}
+                        className="text-xs text-stone-500 hover:text-stone-700 font-medium px-2 py-1"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {selectedItemIds.size > 0 && (
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setShowBulkMoveModal(true)}
+                      className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-50 text-blue-600 rounded-xl font-medium text-sm hover:bg-blue-100 transition-colors"
+                    >
+                      <Move size={16} /> Move
+                    </button>
+                    <button
+                      onClick={bulkArchiveItems}
+                      className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-amber-50 text-amber-600 rounded-xl font-medium text-sm hover:bg-amber-100 transition-colors"
+                    >
+                      <Archive size={16} /> Archive
+                    </button>
+                    <button
+                      onClick={bulkDeleteItems}
+                      className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-red-50 text-red-600 rounded-xl font-medium text-sm hover:bg-red-100 transition-colors"
+                    >
+                      <Trash2 size={16} /> Delete
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Bulk move modal */}
+          {showBulkMoveModal && (
+            <div className="fixed inset-0 bg-stone-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-6" onClick={() => setShowBulkMoveModal(false)}>
+              <div className="w-full max-w-xs bg-white p-6 rounded-3xl shadow-xl border border-stone-100" onClick={(e) => e.stopPropagation()}>
+                <h2 className="text-lg font-bold mb-4">Move {selectedItemIds.size} item{selectedItemIds.size > 1 ? 's' : ''} to:</h2>
+                <div className="space-y-2 mb-4">
+                  {data.buckets
+                    .filter(b => b.id !== activeBucketId)
+                    .map(bucket => (
+                      <button
+                        key={bucket.id}
+                        onClick={() => bulkMoveItems(bucket.id)}
+                        className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left hover:bg-stone-50 transition-colors border border-stone-100"
+                      >
+                        <span className="text-2xl">{bucket.emoji}</span>
+                        <span className="font-medium text-stone-700">{bucket.name}</span>
+                      </button>
+                    ))}
+                </div>
+                <button
+                  onClick={() => setShowBulkMoveModal(false)}
+                  className="w-full px-4 py-3 rounded-xl bg-stone-100 text-stone-600 font-medium hover:bg-stone-200 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
 
           {!modalMode && (
             <div className="fixed bottom-10 left-0 right-0 flex justify-center z-10 pointer-events-none">
