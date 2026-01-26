@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
-import { Plus, ArrowLeft, Trash2, ExternalLink, X, Image as ImageIcon, Link as LinkIcon, CheckCircle2, Star, XCircle, Clipboard, LayoutGrid, List, Camera, Archive, RotateCcw, PenLine, FileDown, MoreVertical, CheckSquare, Square, Move } from 'lucide-react';
+import { Plus, ArrowLeft, Trash2, ExternalLink, X, Image as ImageIcon, Link as LinkIcon, CheckCircle2, Star, XCircle, Clipboard, LayoutGrid, List, Camera, Archive, RotateCcw, PenLine, FileDown, MoreVertical, CheckSquare, Square, Move, Pin, ArrowUpDown } from 'lucide-react';
 
 // --- UTILS ---
 
@@ -439,11 +439,35 @@ export default function App() {
   // --- STATE ---
   const [data, setData] = useState(() => {
     const saved = localStorage.getItem('capture_app_db_v5');
-    return saved ? JSON.parse(saved) : {
+    const migrateDb = (raw) => {
+      const safe = raw && typeof raw === 'object' ? raw : {};
+      const buckets = Array.isArray(safe.buckets) ? safe.buckets : [];
+      const items = Array.isArray(safe.items) ? safe.items : [];
+
+      return {
+        buckets: buckets.map((b) => ({
+          ...b,
+          viewMode: b?.viewMode || 'calm',
+          intent: typeof b?.intent === 'string' ? b.intent : '',
+          sortMode: b?.sortMode || 'manual',
+          createdAt: typeof b?.createdAt === 'number' ? b.createdAt : Date.now(),
+        })),
+        items: items.map((i) => ({
+          ...i,
+          pinned: !!i?.pinned,
+          createdAt: typeof i?.createdAt === 'number' ? i.createdAt : Date.now(),
+          visitCount: typeof i?.visitCount === 'number' ? i.visitCount : 0,
+          isArchived: !!i?.isArchived,
+        })),
+        lastUsedBucketId: safe.lastUsedBucketId || buckets?.[0]?.id || 'b1',
+      };
+    };
+
+    return saved ? migrateDb(JSON.parse(saved)) : {
       buckets: [
-        { id: 'b1', name: 'Inspiration', emoji: '💡', viewMode: 'calm', intent: '', createdAt: Date.now() },
-        { id: 'b2', name: 'Read Later', emoji: '📚', viewMode: 'compact', intent: 'Things that make me smarter.', createdAt: Date.now() },
-        { id: 'b3', name: 'Gear', emoji: '📷', viewMode: 'calm', intent: 'Buy only after 30 days of wanting.', createdAt: Date.now() },
+        { id: 'b1', name: 'Inspiration', emoji: '💡', viewMode: 'calm', intent: '', sortMode: 'manual', createdAt: Date.now() },
+        { id: 'b2', name: 'Read Later', emoji: '📚', viewMode: 'compact', intent: 'Things that make me smarter.', sortMode: 'manual', createdAt: Date.now() },
+        { id: 'b3', name: 'Gear', emoji: '📷', viewMode: 'calm', intent: 'Buy only after 30 days of wanting.', sortMode: 'manual', createdAt: Date.now() },
       ],
       items: [],
       lastUsedBucketId: 'b1'
@@ -457,6 +481,7 @@ export default function App() {
   const [draggedItemId, setDraggedItemId] = useState(null);
   const [showArchive, setShowArchive] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSort, setShowSort] = useState(false);
   const [editingIntent, setEditingIntent] = useState(false);
   const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
   const [selectedItemIds, setSelectedItemIds] = useState(new Set());
@@ -674,6 +699,13 @@ export default function App() {
     }));
   };
 
+  const setBucketSortMode = (bucketId, sortMode) => {
+    setData(prev => ({
+      ...prev,
+      buckets: prev.buckets.map(b => b.id === bucketId ? { ...b, sortMode } : b)
+    }));
+  };
+
   const addItem = (content, targetBucketId, type = 'url', initialTitle = null, initialImage = null) => {
     const isUrl = type === 'url' || content.startsWith('http');
     const site = isUrl ? getDomain(content) : '';
@@ -716,6 +748,7 @@ export default function App() {
       price: '',
       status: 'saved',
       isArchived: false,
+      pinned: false,
       visitCount: 0,
       metaStatus: initialMetaDone ? 'done' : (isUrl ? 'pending' : 'done'),
       metaAttempts: 0,
@@ -742,6 +775,20 @@ export default function App() {
       ...prev,
       items: prev.items.map(item => item.id === id ? { ...item, ...updates } : item)
     }));
+  };
+
+  const togglePinItem = (id) => {
+    setData(prev => {
+      const item = prev.items.find(i => i.id === id);
+      if (!item) return prev;
+      const nextPinned = !item.pinned;
+      // fire-and-forget UI feedback
+      setFlashMessage(nextPinned ? 'Pinned' : 'Unpinned');
+      return {
+        ...prev,
+        items: prev.items.map(i => i.id === id ? { ...i, pinned: nextPinned } : i)
+      };
+    });
   };
 
   const archiveItem = (id) => {
@@ -1140,16 +1187,80 @@ export default function App() {
     const activeItems = data.items.filter(i => i.bucketId === activeBucketId && !i.isArchived);
     const archivedItems = data.items.filter(i => i.bucketId === activeBucketId && i.isArchived);
     const isCompact = bucket?.viewMode === 'compact';
+    const sortMode = bucket?.sortMode || 'manual';
+    const canReorder = sortMode === 'manual';
+    const isTouchUi = !!(window.matchMedia && window.matchMedia('(hover: none)').matches);
+
+    const SORT_OPTIONS = [
+      { id: 'manual', label: 'Manual', sub: 'Drag to reorder' },
+      { id: 'newest', label: 'Newest', sub: 'Most recently added first' },
+      { id: 'oldest', label: 'Oldest', sub: 'Oldest items first' },
+      { id: 'visited', label: 'Most visited', sub: 'Highest revisit count' },
+      { id: 'title', label: 'Title (A–Z)', sub: 'Alphabetical by title' },
+      { id: 'status', label: 'Status', sub: 'Shortlisted → Saved → Rejected' },
+    ];
+
+    const applySort = (next) => {
+      setBucketSortMode(bucket.id, next);
+      setShowSort(false);
+      setFlashMessage(next === 'manual' ? 'Manual sorting' : 'Sorted');
+    };
+
+    const getDisplayItems = () => {
+      const base = [...activeItems];
+
+      const compareStatus = (a, b) => {
+        const rank = { shortlisted: 0, saved: 1, rejected: 2 };
+        const ra = rank[a.status] ?? 9;
+        const rb = rank[b.status] ?? 9;
+        if (ra !== rb) return ra - rb;
+        return (b.createdAt || 0) - (a.createdAt || 0);
+      };
+
+      if (sortMode !== 'manual') {
+        base.sort((a, b) => {
+          // pinned always first
+          const pa = a.pinned ? 1 : 0;
+          const pb = b.pinned ? 1 : 0;
+          if (pa !== pb) return pb - pa;
+
+          if (sortMode === 'newest') return (b.createdAt || 0) - (a.createdAt || 0);
+          if (sortMode === 'oldest') return (a.createdAt || 0) - (b.createdAt || 0);
+          if (sortMode === 'visited') return (b.visitCount || 0) - (a.visitCount || 0);
+          if (sortMode === 'title') return String(a.title || '').localeCompare(String(b.title || ''), undefined, { sensitivity: 'base' });
+          if (sortMode === 'status') return compareStatus(a, b);
+
+          return 0;
+        });
+        return base;
+      }
+
+      // manual: preserve existing order but float pinned items to top
+      const pinned = base.filter(i => i.pinned);
+      const unpinned = base.filter(i => !i.pinned);
+      return [...pinned, ...unpinned];
+    };
+
+    const displayItems = getDisplayItems();
 
     if (!bucket) return setView('home');
 
     return (
       <div className={`min-h-screen bg-stone-50 text-stone-900 flex flex-col items-center ${isNavigating ? `is-navigating navigation-${navigationDirection}` : ''}`}>
         <div className="w-full max-w-md min-h-screen flex flex-col relative px-4">
-          <header className="pt-10 pb-4 flex items-center justify-between sticky top-0 bg-stone-50/90 backdrop-blur-md z-20">
+          <header className="pt-10 pb-4 flex items-center justify-between sticky top-0 bg-stone-50/90 backdrop-blur-md z-40">
             <button onClick={() => setView('home')} className="p-2 -ml-2 rounded-full hover:bg-stone-200"><ArrowLeft size={24} /></button>
             <h1 className="text-lg font-bold flex items-center gap-2"><span>{bucket.emoji}</span> {bucket.name}</h1>
             <div className="flex items-center gap-1 relative">
+              <button
+                onClick={() => { setShowSort(!showSort); setShowSettings(false); }}
+                className={`p-2 rounded-full hover:bg-stone-200 transition-colors ${sortMode !== 'manual' ? 'text-stone-800' : 'text-stone-400'}`}
+                title={`Sort (${SORT_OPTIONS.find(o => o.id === sortMode)?.label || 'Manual'})`}
+                aria-haspopup="dialog"
+                aria-expanded={showSort}
+              >
+                <ArrowUpDown size={20} />
+              </button>
               <button 
                 onClick={toggleMultiSelectMode} 
                 className={`p-2 rounded-full hover:bg-stone-200 transition-colors ${
@@ -1162,12 +1273,46 @@ export default function App() {
               <button onClick={() => toggleBucketDensity(bucket.id)} className="p-2 rounded-full hover:bg-stone-200 text-stone-400">
                 {isCompact ? <LayoutGrid size={20} /> : <List size={20} />}
               </button>
-              <button onClick={() => setShowSettings(!showSettings)} className="p-2 rounded-full hover:bg-stone-200 text-stone-400">
+              <button onClick={() => { setShowSettings(!showSettings); setShowSort(false); }} className="p-2 rounded-full hover:bg-stone-200 text-stone-400">
                 <MoreVertical size={20} />
               </button>
 
+              {/* Sort UI: desktop popover */}
+              {showSort && !isTouchUi && (
+                <div
+                  className="absolute top-full right-0 mt-2 w-72 bg-white rounded-2xl shadow-xl border border-stone-100 p-2 z-50 animate-in fade-in zoom-in-95 duration-100"
+                  role="dialog"
+                  aria-label="Sort"
+                >
+                  <div className="px-3 py-2">
+                    <div className="flex items-center justify-between">
+                      <div className="text-[10px] font-black uppercase tracking-widest text-stone-400">Sort</div>
+                      <div className="text-[10px] font-bold text-stone-300">Pinned stays on top</div>
+                    </div>
+                    {sortMode !== 'manual' && (
+                      <div className="mt-2 text-xs text-stone-400">Drag reorder is disabled while sorting.</div>
+                    )}
+                    <div className="mt-3 space-y-1">
+                      {SORT_OPTIONS.map(opt => (
+                        <button
+                          key={opt.id}
+                          onClick={() => applySort(opt.id)}
+                          className={`w-full text-left px-3 py-2 rounded-xl transition-colors ${sortMode === opt.id ? 'bg-stone-900 text-white' : 'hover:bg-stone-50 text-stone-700'}`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-sm">{opt.label}</span>
+                            {sortMode === opt.id && <span className="text-xs">✓</span>}
+                          </div>
+                          <div className={`text-xs ${sortMode === opt.id ? 'text-white/80' : 'text-stone-400'}`}>{opt.sub}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {showSettings && (
-                <div className="absolute top-full right-0 mt-2 w-56 bg-white rounded-2xl shadow-xl border border-stone-100 p-2 z-30 animate-in fade-in zoom-in-95 duration-100">
+                <div className="absolute top-full right-0 mt-2 w-56 bg-white rounded-2xl shadow-xl border border-stone-100 p-2 z-50 animate-in fade-in zoom-in-95 duration-100">
                   <button 
                     onClick={() => exportDecisionSnapshot(bucket.id)}
                     className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold text-stone-600 hover:bg-stone-50 transition-colors"
@@ -1186,7 +1331,50 @@ export default function App() {
             </div>
           </header>
 
-          {showSettings && <div className="fixed inset-0 z-20" onClick={() => setShowSettings(false)} />}
+          {(showSettings || (showSort && !isTouchUi)) && (
+            <div className="fixed inset-0 z-30" onClick={() => { setShowSettings(false); setShowSort(false); }} />
+          )}
+
+          {/* Sort UI: mobile bottom sheet */}
+          {showSort && isTouchUi && (
+            <div className="fixed inset-0 z-50" onClick={() => setShowSort(false)} role="dialog" aria-modal="true" aria-label="Sort">
+              <div className="absolute inset-0 bg-stone-900/30 backdrop-blur-[2px]" />
+              <div
+                className="absolute inset-x-0 bottom-0 bg-white border-t border-stone-100 shadow-[0_-15px_50px_rgba(0,0,0,0.15)] p-4 pb-8 rounded-t-[2.5rem]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex justify-between items-center mb-3 px-2">
+                  <div>
+                    <div className="text-xs font-bold uppercase tracking-widest text-stone-400">Sort</div>
+                    <div className="text-xs text-stone-400 mt-1">Pinned stays on top</div>
+                  </div>
+                  <button onClick={() => setShowSort(false)} className="p-1.5 bg-stone-100 rounded-full text-stone-400" aria-label="Close"><X size={16} /></button>
+                </div>
+
+                {sortMode !== 'manual' && (
+                  <div className="text-xs text-stone-400 px-2 pb-2">Drag reorder is disabled while sorting.</div>
+                )}
+
+                <div className="space-y-2 px-2">
+                  {SORT_OPTIONS.map(opt => (
+                    <button
+                      key={opt.id}
+                      onClick={() => applySort(opt.id)}
+                      className={`w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl border transition-colors ${sortMode === opt.id ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-700 border-stone-100 hover:bg-stone-50'}`}
+                    >
+                      <div className="text-left">
+                        <div className="font-bold">{opt.label}</div>
+                        <div className={`text-xs ${sortMode === opt.id ? 'text-white/80' : 'text-stone-400'}`}>{opt.sub}</div>
+                      </div>
+                      <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center ${sortMode === opt.id ? 'border-white bg-white/15' : 'border-stone-200'}`}>
+                        {sortMode === opt.id && <CheckCircle2 size={16} className="text-white" />}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Intent Header */}
           <div className="mb-8 px-2">
@@ -1220,23 +1408,23 @@ export default function App() {
           </div>
 
           <div className={`flex-1 grid gap-3 content-start pb-20 ${isCompact ? 'grid-cols-2' : 'grid-cols-1'}`}>
-            {activeItems.length === 0 && (
+            {displayItems.length === 0 && (
               <div className="flex flex-col items-center justify-center py-20 text-stone-300 space-y-4 text-center empty-state">
                  <div className="p-6 bg-stone-100 rounded-full"><Plus size={32} /></div>
                  <p className="small-meta empty-state-title">This space is ready.</p>
               </div>
             )}
-            {activeItems.map(item => {
+            {displayItems.map(item => {
               const statusAccent = item.status === 'saved' ? 'border-l-4 border-emerald-200' : item.status === 'shortlisted' ? 'border-l-4 border-indigo-200' : 'border-l-4 border-rose-200';
               const isSelected = selectedItemIds.has(item.id);
               return (
               <div
                 key={item.id}
-                draggable={!isMultiSelectMode}
-                onDragStart={(e) => { setDraggedItemId(item.id); e.currentTarget.style.opacity = '0.5'; }}
-                onDragEnd={(e) => { setDraggedItemId(null); e.currentTarget.style.opacity = '1'; }}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => { e.preventDefault(); if (draggedItemId) reorderItems(draggedItemId, item.id); }}
+                draggable={!isMultiSelectMode && canReorder}
+                onDragStart={(e) => { if (!canReorder) return; setDraggedItemId(item.id); e.currentTarget.style.opacity = '0.5'; }}
+                onDragEnd={(e) => { if (!canReorder) return; setDraggedItemId(null); e.currentTarget.style.opacity = '1'; }}
+                onDragOver={(e) => { if (!canReorder) return; e.preventDefault(); }}
+                onDrop={(e) => { if (!canReorder) return; e.preventDefault(); if (draggedItemId) reorderItems(draggedItemId, item.id); }}
                 className={`transition-all ${draggedItemId === item.id ? 'scale-95' : ''} ${isSelected ? 'ring-2 ring-blue-500' : ''}`}
               >
                 <button
@@ -1279,6 +1467,11 @@ export default function App() {
                     {item.image ? <img src={item.image} className="w-full h-full object-cover" alt="" /> : <span className="text-2xl font-black text-stone-900/10 uppercase">{getInitial(item.title)}</span>}
                     {/* metadata badges */}
                     <div className="absolute top-2 right-2 flex items-center gap-2">
+                      {item.pinned && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase bg-stone-900/80 text-white px-2 py-1 rounded-full" title="Pinned">
+                          <Pin size={12} />
+                        </span>
+                      )}
                       <span className={`text-xs font-bold uppercase px-2 py-1 rounded-full ${item.status === 'saved' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : item.status === 'shortlisted' ? 'bg-indigo-50 text-indigo-700 border border-indigo-100' : 'bg-rose-50 text-rose-700 border border-rose-100'}`}>
                         {item.status}
                       </span>
@@ -1387,9 +1580,9 @@ export default function App() {
                     {selectedItemIds.size > 0 ? `${selectedItemIds.size} selected` : 'Select items'}
                   </span>
                   <div className="flex gap-1">
-                    {selectedItemIds.size > 0 && selectedItemIds.size < activeItems.length && (
+                    {selectedItemIds.size > 0 && selectedItemIds.size < displayItems.length && (
                       <button 
-                        onClick={() => selectAllItems(activeItems)}
+                        onClick={() => selectAllItems(displayItems)}
                         className="text-xs text-blue-600 hover:text-blue-700 font-medium px-2 py-1"
                       >
                         Select All
@@ -1504,9 +1697,18 @@ export default function App() {
                 <p className="text-[10px] font-black uppercase text-stone-400 tracking-[0.2em]">Item Insight</p>
                 <p className="text-xs text-stone-300 font-medium">Revisit #{item.visitCount}</p>
              </div>
-             <button onClick={() => archiveItem(item.id)} className="p-2 rounded-full hover:bg-amber-50 text-stone-200 hover:text-amber-600" title="Archive">
-              <Archive size={20} />
-            </button>
+             <div className="flex items-center gap-1">
+               <button
+                 onClick={() => togglePinItem(item.id)}
+                 className={`p-2 rounded-full hover:bg-stone-100 transition-colors ${item.pinned ? 'text-stone-900' : 'text-stone-300 hover:text-stone-700'}`}
+                 title={item.pinned ? 'Unpin' : 'Pin'}
+               >
+                 <Pin size={20} />
+               </button>
+               <button onClick={() => archiveItem(item.id)} className="p-2 rounded-full hover:bg-amber-50 text-stone-200 hover:text-amber-600" title="Archive">
+                <Archive size={20} />
+               </button>
+             </div>
           </header>
 
           <div className="flex-1 overflow-y-auto pb-10">
