@@ -1512,6 +1512,16 @@ export default function App() {
                   <div className="preview-title">{previewItem.title}</div>
                   <div className="preview-domain"><img src={getFavicon(previewItem.url)} alt="" className="fav" /> <span className="truncate">{previewItem.domain}</span></div>
                   <div className="preview-actions">
+                    <button
+                      onClick={() => {
+                        togglePinItem(previewItem.id);
+                        setPreviewItem(p => p ? { ...p, pinned: !p.pinned } : p);
+                      }}
+                      className="btn-ghost"
+                      title={previewItem.pinned ? 'Unpin' : 'Pin'}
+                    >
+                      <span className="inline-flex items-center gap-2"><Pin size={14} /> {previewItem.pinned ? 'Unpin' : 'Pin'}</span>
+                    </button>
                     <button onClick={() => { setPreviewItem(null); setPreviewMode(null); setActiveItemId(previewItem.id); setView('item'); }} className="btn-ghost">Open</button>
                     <a href={previewItem.url || '#'} target="_blank" rel="noreferrer" className="btn-ghost">Visit</a>
                   </div>
@@ -1530,6 +1540,16 @@ export default function App() {
                     <h2 className="modal-title">{previewItem.title}</h2>
                     <p className="modal-domain"><img src={getFavicon(previewItem.url)} alt="" className="fav"/> {previewItem.domain}</p>
                     <div className="modal-actions">
+                      <button
+                        className="btn-ghost"
+                        onClick={() => {
+                          togglePinItem(previewItem.id);
+                          setPreviewItem(p => p ? { ...p, pinned: !p.pinned } : p);
+                        }}
+                        title={previewItem.pinned ? 'Unpin' : 'Pin'}
+                      >
+                        <span className="inline-flex items-center gap-2"><Pin size={14} /> {previewItem.pinned ? 'Unpin' : 'Pin'}</span>
+                      </button>
                       <button className="btn-primary" onClick={() => { setActiveItemId(previewItem.id); setView('item'); setPreviewItem(null); setPreviewMode(null); }}>Open</button>
                       {previewItem.url && <a className="btn-ghost" href={previewItem.url} target="_blank" rel="noreferrer">Visit</a>}
                     </div>
